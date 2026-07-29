@@ -127,6 +127,25 @@ export class TelegramClient {
     this.pollingTask = undefined;
   }
 
+  async setCommands(): Promise<void> {
+    await this.bot.api.setMyCommands([
+      { command: "help", description: "Show available commands" },
+      { command: "agents", description: "List Herdr agents with status" },
+      { command: "status", description: "Show bridge status" },
+      { command: "read", description: "Read output from an agent" },
+      { command: "reply", description: "Read output then reply to an agent" },
+      { command: "send", description: "Send text to an agent" },
+      { command: "last", description: "Read this topic's pane output" },
+      { command: "follow", description: "Follow updates in this topic" },
+      { command: "unfollow", description: "Stop following this topic" },
+      { command: "stop", description: "Soft stop this topic's agent" },
+      { command: "interrupt", description: "Hard interrupt an agent" },
+      { command: "trust", description: "Trust tools for an agent" },
+      { command: "bind", description: "Bind this topic to a pane" },
+      { command: "topics", description: "List bound topic ids" },
+      { command: "reconcile", description: "Sync Herdr panes to topics" },
+    ]);
+  }
   async createForumTopic(chatId: number, name: string): Promise<number> {
     const result = await this.bot.api.createForumTopic(chatId, name);
     return result.message_thread_id;

@@ -1,13 +1,14 @@
 import type { PaneInfo, TopicInfo, ThreadMapping } from "./types.js";
 import { getAgents } from "./herdr-client.js";
+import { topicNameForPane } from "./topic-names.js";
 import type { TelegramClient } from "./telegram-client.js";
 
 export function matchTopic(
   pane: PaneInfo,
   topics: TopicInfo[]
 ): number | undefined {
-  const label = pane.label.toLowerCase();
-  const match = topics.find((t) => t.name.toLowerCase() === label);
+  const labels = new Set([topicNameForPane(pane).toLowerCase(), pane.label.toLowerCase()]);
+  const match = topics.find((t) => labels.has(t.name.toLowerCase()));
   return match?.message_thread_id;
 }
 
@@ -61,7 +62,8 @@ export async function reconcile(
 
   // Step 2: For each pane, find or create a topic.
   for (const pane of panes) {
-    const labelLower = pane.label.toLowerCase();
+    const topicName = topicNameForPane(pane);
+    const labelLower = topicName.toLowerCase();
 
     // Check if any existing mapping already covers this pane by pane_id.
     let threadId: number | undefined;
@@ -83,14 +85,14 @@ export async function reconcile(
     // Else create a new topic.
     if (!threadId) {
       try {
-        threadId = await tg.createForumTopic(chatId, pane.label);
+        threadId = await tg.createForumTopic(chatId, topicName);
         knownTopics[threadId] = {
-          name: pane.label,
+          name: topicName,
           created_at: new Date().toISOString(),
         };
-        created.push(pane.label);
+        created.push(topicName);
       } catch {
-        failed.push(pane.label);
+        failed.push(topicName);
         continue;
       }
     }
@@ -155,7 +157,7 @@ export function seedKnownTabs(
       if (m.pane_id === pane.pane_id) { threadId = tid; break; }
     }
     if (threadId) {
-      tabs[pane.tab_id] = { label: pane.label, thread_id: threadId };
+      tabs[pane.tab_id] = { label: topicNameForPane(pane), thread_id: threadId };
     }
   }
   return tabs;

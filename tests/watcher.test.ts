@@ -1,5 +1,7 @@
 import { describe, it, expect } from "vitest";
 import type { PaneInfo } from "../src/types.js";
+import { syncTabs } from "../src/watcher.js";
+import { ThinkingRelayTracker } from "../src/thinking-relay.js";
 
 /**
  * Pure function extracted from watcher.ts: classify herdr panes against
@@ -90,5 +92,56 @@ describe("classifyTabChanges", () => {
     expect(result.added).toEqual(["w1:tA"]);
     expect(result.renamed).toEqual(["w1:tB"]);
     expect(result.removed).toEqual(["w1:tC"]);
+  });
+});
+describe("syncTabs message ordering", () => {
+  it("sends fresh thinking before the blocked approval prompt", async () => {
+    let pane = makePane({
+      tab_id: "w1:tA",
+      pane_id: "w1:pA",
+      label: "Test",
+      workspace_label: "Video Review",
+      status: "working",
+    });
+    let output = "prompt";
+    const sent: Array<{ text: string; opts?: unknown }> = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string, opts?: unknown) => {
+        sent.push({ text, opts });
+        return sent.length;
+      },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {
+        10: { pane_id: pane.pane_id, label: pane.label, agent: pane.agent, created_at: "now" },
+      },
+      known_tabs: {
+        [pane.tab_id]: { label: "VR-Test", thread_id: 10, status: "working" },
+      },
+    };
+    const deps = {
+      map: new Map([[10, state.thread_mappings[10]]]),
+      thinkingTracker: new ThinkingRelayTracker(),
+      getAgents: () => [pane],
+      readPane: () => output,
+    };
+
+    await syncTabs(1, telegram as any, state, deps);
+    pane = { ...pane, status: "blocked" };
+    output = [
+      "prompt",
+      "• Validation completed",
+      "Would you like to continue?",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+    ].join("\n");
+    await syncTabs(1, telegram as any, state, deps);
+
+    expect(sent.map((message) => message.text)).toEqual([
+      "• Validation completed",
+      expect.stringContaining("needs input (working -> blocked)"),
+    ]);
   });
 });

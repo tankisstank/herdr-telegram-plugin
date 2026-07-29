@@ -4,7 +4,8 @@ export interface PaneInfo {
   agent: string;
   tab_id: string;
   workspace_id: string;
-  status: "idle" | "working" | "blocked" | "unknown";
+  workspace_label?: string;
+  status: "idle" | "working" | "blocked" | "done" | "unknown";
 }
 
 export interface ThreadMapping {
@@ -28,7 +29,7 @@ export interface DaemonState {
   known_topics?: Record<number, { name: string; created_at: string }>;
   /** Tabs the bot has observed. Maps tab_id -> { label, thread_id }.
    *  Used by the watcher to detect new/closed/renamed tabs. */
-  known_tabs?: Record<string, { label: string; thread_id: number }>;
+  known_tabs?: Record<string, { label: string; thread_id: number; status?: PaneInfo["status"] }>;
   /** Recently handled Telegram update ids, retained to prevent replay after restart. */
   processed_update_ids?: number[];
 }

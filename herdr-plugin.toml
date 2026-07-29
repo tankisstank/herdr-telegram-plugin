@@ -3,15 +3,15 @@ name = "Herdr Telegram Bridge"
 version = "0.1.0"
 min_herdr_version = "0.7.0"
 description = "Control your herdr agents from Telegram via forum topics. Zero-LLM bridge."
-platforms = ["linux"]
+platforms = ["linux", "windows"]
 
 [[build]]
 command = ["npm", "ci"]
-platforms = ["linux"]
+platforms = ["linux", "windows"]
 
 [[build]]
 command = ["npm", "run", "build"]
-platforms = ["linux"]
+platforms = ["linux", "windows"]
 
 [[actions]]
 id = "bootstrap"

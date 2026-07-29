@@ -66,8 +66,8 @@ describe("seedKnownTabs", () => {
     const panes = [makePane("w1:pA", "w1:tA", "Agent A"), makePane("w1:pB", "w1:tB", "Agent B")];
     const result = seedKnownTabs(map, panes, {});
     expect(result).toEqual({
-      "w1:tA": { label: "Agent A", thread_id: 10 },
-      "w1:tB": { label: "Agent B", thread_id: 20 },
+      "w1:tA": { label: "W1-Agent A", thread_id: 10 },
+      "w1:tB": { label: "W1-Agent B", thread_id: 20 },
     });
   });
 
@@ -88,7 +88,7 @@ describe("seedKnownTabs", () => {
     const existing = { "w1:tB": { label: "Old B", thread_id: 99 } };
     const result = seedKnownTabs(map, panes, existing);
     expect(result["w1:tB"]).toEqual({ label: "Old B", thread_id: 99 });
-    expect(result["w1:tA"]).toEqual({ label: "Agent A", thread_id: 10 });
+    expect(result["w1:tA"]).toEqual({ label: "W1-Agent A", thread_id: 10 });
   });
 
   it("does not overwrite already-seeded tab_ids", () => {
@@ -96,10 +96,10 @@ describe("seedKnownTabs", () => {
       [10, { pane_id: "w1:pA", label: "Agent A", agent: "pi", created_at: "x" }],
     ]);
     const panes = [makePane("w1:pA", "w1:tA", "Agent A Renamed")];
-    const existing = { "w1:tA": { label: "Agent A", thread_id: 10 } };
+    const existing = { "w1:tA": { label: "W1-Agent A", thread_id: 10 } };
     const result = seedKnownTabs(map, panes, existing);
     // Already-seeded entry is NOT overwritten (rename detection is the watcher's job)
-    expect(result["w1:tA"]).toEqual({ label: "Agent A", thread_id: 10 });
+    expect(result["w1:tA"]).toEqual({ label: "W1-Agent A", thread_id: 10 });
   });
 });
 

@@ -1,0 +1,64 @@
+import { describe, expect, it } from "vitest";
+import {
+  extractThinkingBlocks,
+  ThinkingRelayTracker,
+} from "../src/thinking-relay.js";
+
+describe("extractThinkingBlocks", () => {
+  it("keeps progress bullets and their wrapped continuation lines", () => {
+    const raw = [
+      "old transcript",
+      "• Tests pass. Tôi restart daemon để parser mới có hiệu lực.",
+      "  Chi tiết tiếp tục ở dòng bị wrap.",
+      "• Daemon mới đã start. Tôi đọc status và log khởi động.",
+      "› 1. Yes, proceed (y)",
+    ].join("\n");
+
+    expect(extractThinkingBlocks(raw)).toEqual([
+      "• Tests pass. Tôi restart daemon để parser mới có hiệu lực.\n  Chi tiết tiếp tục ở dòng bị wrap.",
+      "• Daemon mới đã start. Tôi đọc status và log khởi động.",
+    ]);
+  });
+
+  it("ignores terminal tool activity and working ticker bullets", () => {
+    const raw = [
+      "• Ran rg -n renderQueue backend\\app\\web\\app.js",
+      "  └ 487:function renderQueue(q)",
+      "• Working (4m 30s • esc to interrupt)",
+      "• Added backend\\\\app\\\\telegram\\\\bot.py (+103 lines)",
+      "• Updated Plan",
+      "• Music state và API contract đã được bổ sung; code đã compile.",
+    ].join("\n");
+
+    expect(extractThinkingBlocks(raw)).toEqual([
+      "• Music state và API contract đã được bổ sung; code đã compile.",
+    ]);
+  });
+});
+
+describe("ThinkingRelayTracker", () => {
+  it("uses the first pane read as a baseline and emits only appended bullets", () => {
+    const tracker = new ThinkingRelayTracker();
+    expect(tracker.capture("1-1", "prompt\n• Existing update")).toEqual([]);
+    expect(tracker.capture("1-1", "prompt\n• Existing update\n• New update")).toEqual([
+      "• New update",
+    ]);
+  });
+
+  it("deduplicates bullets when a terminal redraw loses the common prefix", () => {
+    const tracker = new ThinkingRelayTracker();
+    tracker.capture("1-1", "prompt\n• Existing before startup");
+    expect(tracker.capture("1-1", "redrawn\n• Existing before startup")).toEqual([]);
+    expect(tracker.capture("1-1", "redrawn\n• Existing before startup\n• Sent once")).toEqual(["• Sent once"]);
+    expect(tracker.capture("1-1", "another redraw\n• Sent once")).toEqual([]);
+  });
+
+  it("advances the snapshot while another observer owns the pane", () => {
+    const tracker = new ThinkingRelayTracker();
+    tracker.capture("1-1", "prompt");
+    expect(tracker.capture("1-1", "prompt\n• Sent by follow loop", false)).toEqual([]);
+    expect(tracker.capture("1-1", "prompt\n• Sent by follow loop\n• Watcher resumes")).toEqual([
+      "• Watcher resumes",
+    ]);
+  });
+});

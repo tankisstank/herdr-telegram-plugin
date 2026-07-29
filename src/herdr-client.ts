@@ -106,7 +106,7 @@ function execHerdr(args: string[]): void {
   }
 }
 
-export function parseAgentList(raw: string, tabLabels?: Map<string, string>): PaneInfo[] {
+export function parseAgentList(raw: string, tabLabels?: Map<string, string>, workspaceLabels?: Map<string, string>): PaneInfo[] {
   try {
     const parsed = JSON.parse(raw);
     const agents: any[] = parsed?.result?.agents ?? [];
@@ -120,12 +120,19 @@ export function parseAgentList(raw: string, tabLabels?: Map<string, string>): Pa
         agent: a.agent ?? "?",
         tab_id: tabId,
         workspace_id: String(a.workspace_id),
+        workspace_label: workspaceLabels?.get(String(a.workspace_id)) ?? basenameFromPath(a.cwd ?? a.foreground_cwd ?? a.terminal_title_stripped ?? ""),
         status: String(a.agent_status || "unknown") as PaneInfo["status"],
       };
     });
   } catch {
     return [];
   }
+}
+
+function basenameFromPath(value: string): string | undefined {
+  const normalized = value.replace(/\\/g, "/");
+  const base = normalized.split("/").filter(Boolean).at(-1);
+  return base || undefined;
 }
 
 export function getAgents(): PaneInfo[] {
@@ -145,8 +152,19 @@ export function getAgents(): PaneInfo[] {
   } catch {
     // Tab list failed — fall back to cwd dirnames
   }
+  const workspaceLabels = new Map<string, string>();
+  try {
+    const workspaceRaw = execHerdrJson(["workspace", "list"]);
+    const workspaces = JSON.parse(workspaceRaw);
+    const workspaceItems: any[] = workspaces?.result?.workspaces ?? [];
+    for (const w of workspaceItems) {
+      if (w.workspace_id && w.label) workspaceLabels.set(String(w.workspace_id), String(w.label));
+    }
+  } catch {
+    // Workspace list failed - fall back to cwd basename from agent list.
+  }
   const raw = execHerdrJson(["agent", "list"]);
-  const agents = parseAgentList(raw, tabLabels);
+  const agents = parseAgentList(raw, tabLabels, workspaceLabels);
   // Sort by tab order from herdr
   const orderMap = new Map(tabOrder.map((id, i) => [id, i]));
   agents.sort((a, b) => {
@@ -180,6 +198,10 @@ export function sendKeys(paneId: string, key: string, ...moreKeys: string[]): vo
 
 export function sendEscape(paneId: string): void {
   sendKeys(paneId, "Escape");
+}
+
+export function sendInterrupt(paneId: string): void {
+  sendKeys(paneId, "Ctrl+c");
 }
 
 export function buildWaitArgs(paneId: string, timeoutS: number): string[] {

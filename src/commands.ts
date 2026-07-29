@@ -1,6 +1,6 @@
 import { Bot, type Context, InlineKeyboard } from "grammy";
 import type { PaneInfo, ThreadMapping } from "./types.js";
-import { getAgents, readPane, sendText, sendEscape } from "./herdr-client.js";
+import { getAgents, readPane, sendText, sendEscape, sendInterrupt } from "./herdr-client.js";
 import { findMapping } from "./mapping.js";
 import { isPaired } from "./pairing.js";
 import type { DaemonState } from "./types.js";
@@ -75,6 +75,8 @@ export interface CommandDeps {
   /** Optional hook called by /unfollow after dropping a subscription, so
    *  the daemon can stop the background poll loop. */
   onFollowStop?: (threadId: number) => void;
+  /** Start a full observed turn, used by /reply and picker-driven free text. */
+  startAgentTurn?: (mapping: ThreadMapping, threadId: number, text: string) => void;
 }
 
 /** Format the body of a /last readback. Pure function: easy to unit-test. */
@@ -97,12 +99,145 @@ export function formatLastReadback(opts: {
   return `[${ts}] ${opts.mapping.label}\n\n${truncated}${busyHint}`;
 }
 
+function findPaneByQuery(panes: PaneInfo[], query: string): PaneInfo | undefined {
+  const q = query.trim().toLowerCase();
+  if (!q) return undefined;
+  return panes.find((p) =>
+    p.pane_id.toLowerCase() === q ||
+    p.label.toLowerCase() === q ||
+    p.label.toLowerCase().includes(q) ||
+    p.agent.toLowerCase().includes(q)
+  );
+}
+
+function mappingForPane(map: Map<number, ThreadMapping>, paneId: string): { threadId: number; mapping: ThreadMapping } | undefined {
+  for (const [threadId, mapping] of map.entries()) {
+    if (mapping.pane_id === paneId) return { threadId, mapping };
+  }
+  return undefined;
+}
+
+function agentPicker(action: "read" | "send" | "reply" | "trust" | "interrupt", panes: PaneInfo[]): InlineKeyboard {
+  const keyboard = new InlineKeyboard();
+  for (const pane of panes.slice(0, 12)) {
+    keyboard.text(`${pane.label} (${pane.agent}, ${pane.status})`, `agent|${action}|${pane.pane_id}`).row();
+  }
+  return keyboard;
+}
+
+function truncateMiddle(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  return `(... ${text.length - maxChars} chars omitted)\n${text.slice(-maxChars)}`;
+}
 export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
+  const pendingTargets = new Map<number, { paneId: string; mode: "send" | "reply" }>();
+
+  async function readPaneForReply(ctx: Context, paneId: string): Promise<void> {
+    const selected = mappingForPane(deps.map, paneId);
+    if (!selected) {
+      await ctx.reply("No bound topic for this agent. Use /reconcile or /bind first.");
+      return;
+    }
+    let raw: string;
+    try {
+      raw = readPane(paneId, 4_000);
+    } catch (err: any) {
+      await ctx.reply(`Failed to read pane: ${err.message}`);
+      return;
+    }
+    const cleaned = cleanPaneOutput(stripStatusBar(raw));
+    const body = truncateMiddle(cleaned || "(empty)", 3000);
+    const msg = await ctx.reply(`${selected.mapping.label}:\n\n${body}\n\nReply to this message, or type your next message here, to send it to this agent.`);
+    pendingTargets.set(ctx.chat!.id, { paneId, mode: "reply" });
+    pendingTargets.set(msg.message_id, { paneId, mode: "reply" });
+  }
+
+  async function sendToPaneFromText(ctx: Context, paneId: string, text: string, mode: "send" | "reply"): Promise<void> {
+    const selected = mappingForPane(deps.map, paneId);
+    if (!selected) {
+      await ctx.reply("No bound topic for this agent. Use /reconcile or /bind first.");
+      return;
+    }
+    if (mode === "reply" && deps.startAgentTurn) {
+      deps.startAgentTurn(selected.mapping, selected.threadId, text);
+      await ctx.reply(`Sent to ${selected.mapping.label}. Watching the bound topic for the response.`);
+      return;
+    }
+    sendText(paneId, text);
+    await ctx.reply(`Sent to ${selected.mapping.label}.`);
+  }
+
+  async function handleAgentPicker(ctx: Context, action: string, paneId: string): Promise<void> {
+    const selected = mappingForPane(deps.map, paneId);
+    if (!selected) {
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "No bound topic." });
+      else await ctx.reply("No bound topic for this agent. Use /reconcile or /bind first.");
+      return;
+    }
+    if (ctx.callbackQuery) await ctx.answerCallbackQuery();
+    if (action === "read") {
+      let raw: string;
+      try {
+        raw = readPane(paneId, 4_000);
+      } catch (err: any) {
+        await ctx.reply(`Failed to read pane: ${err.message}`);
+        return;
+      }
+      const cleaned = cleanPaneOutput(stripStatusBar(raw));
+      const msg = await ctx.reply(`${selected.mapping.label}:\n\n${truncateMiddle(cleaned || "(empty)", 3500)}`);
+      pendingTargets.set(msg.message_id, { paneId, mode: "reply" });
+      return;
+    }
+    if (action === "reply") {
+      await readPaneForReply(ctx, paneId);
+      return;
+    }
+    if (action === "send") {
+      pendingTargets.set(ctx.chat!.id, { paneId, mode: "send" });
+      await ctx.reply(`Ready. Type your message to send to ${selected.mapping.label}.`);
+      return;
+    }
+    if (action === "trust") {
+      sendText(paneId, "trust, always allow");
+      await ctx.reply(`Trusted ${selected.mapping.label}.`);
+      return;
+    }
+    if (action === "interrupt") {
+      sendInterrupt(paneId);
+      deps.turns?.abort(paneId);
+      await ctx.reply(`Interrupted ${selected.mapping.label}.`);
+    }
+  }
+
+  if (typeof (bot as any).on === "function") {
+    bot.on("callback_query:data", async (ctx, next) => {
+    const data = ctx.callbackQuery.data;
+    if (!data.startsWith("agent|")) return next();
+    const [, action, paneId] = data.split("|");
+    await handleAgentPicker(ctx, action, paneId);
+  });
+
+  bot.on("message:text", async (ctx, next) => {
+    const text = ctx.message.text;
+    if (!text || text.startsWith("/")) return next();
+    const byReply = ctx.message.reply_to_message?.message_id !== undefined
+      ? pendingTargets.get(ctx.message.reply_to_message.message_id)
+      : undefined;
+    const target = byReply ?? pendingTargets.get(ctx.chat.id);
+    if (!target) return next();
+    pendingTargets.delete(ctx.chat.id);
+    await sendToPaneFromText(ctx, target.paneId, text, target.mode);
+    });
+  }
+
   bot.command("help", async (ctx) => {
     await ctx.reply(
       [
         "/help — this message",
         "/agents — list agents with status and bound threads",
+        "/read [agent] — read last output and allow reply",
+        "/reply [agent] — read output, then type a response",
+        "/send [agent] [text] — send text to an agent",
         "/bind <pane-label> — bind this thread to a pane (use in a new thread)",
         "/unbind — unbind this thread",
         "/topics — list bound topic ids (use /delete <id> to remove)",
@@ -127,6 +262,51 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     await ctx.reply(formatAgentList(panes, deps.map));
   });
 
+  bot.command("read", async (ctx) => {
+    const arg = (ctx.match ?? "").trim();
+    const panes = getAgents();
+    if (!arg) {
+      if (panes.length === 0) { await ctx.reply("No agents active."); return; }
+      await ctx.reply("Read which agent?", { reply_markup: agentPicker("read", panes) });
+      return;
+    }
+    const pane = findPaneByQuery(panes, arg);
+    if (!pane) { await ctx.reply(`No agent matching "${arg}". Use /agents to see list.`); return; }
+    await handleAgentPicker(ctx, "read", pane.pane_id);
+  });
+
+  bot.command("reply", async (ctx) => {
+    const arg = (ctx.match ?? "").trim();
+    const panes = getAgents();
+    if (!arg) {
+      if (panes.length === 0) { await ctx.reply("No agents active."); return; }
+      await ctx.reply("Reply to which agent?", { reply_markup: agentPicker("reply", panes) });
+      return;
+    }
+    const pane = findPaneByQuery(panes, arg);
+    if (!pane) { await ctx.reply(`No agent matching "${arg}". Use /agents to see list.`); return; }
+    await readPaneForReply(ctx, pane.pane_id);
+  });
+
+  bot.command("send", async (ctx) => {
+    const arg = (ctx.match ?? "").trim();
+    const panes = getAgents();
+    if (!arg) {
+      if (panes.length === 0) { await ctx.reply("No agents active."); return; }
+      await ctx.reply("Send to which agent?", { reply_markup: agentPicker("send", panes) });
+      return;
+    }
+    const parts = arg.split(/\s+/);
+    const pane = findPaneByQuery(panes, parts[0]);
+    if (!pane) { await ctx.reply(`No agent matching "${parts[0]}". Use /agents to see list.`); return; }
+    const text = parts.slice(1).join(" ").trim();
+    if (!text) {
+      pendingTargets.set(ctx.chat.id, { paneId: pane.pane_id, mode: "send" });
+      await ctx.reply(`Ready. Type your message to send to ${pane.label}.`);
+      return;
+    }
+    await sendToPaneFromText(ctx, pane.pane_id, text, "send");
+  });
   bot.command("status", async (ctx) => {
     const state = loadState(deps.stateDir);
     const uptime = Math.floor((Date.now() - deps.startTime) / 1000);
@@ -152,11 +332,24 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
   });
 
   bot.command("interrupt", async (ctx) => {
+    const arg = (ctx.match ?? "").trim();
+    if (arg) {
+      const pane = findPaneByQuery(getAgents(), arg);
+      if (!pane) { await ctx.reply(`No agent matching "${arg}". Use /agents to see list.`); return; }
+      await handleAgentPicker(ctx, "interrupt", pane.pane_id);
+      return;
+    }
     const threadId = ctx.message?.message_thread_id;
-    if (!threadId) return;
+    if (!threadId) {
+      const panes = getAgents().filter((p) => ["working", "blocked"].includes(p.status));
+      if (panes.length === 0) { await ctx.reply("No active agents to interrupt."); return; }
+      await ctx.reply("Interrupt which agent?", { reply_markup: agentPicker("interrupt", panes) });
+      return;
+    }
     const mapping = findMapping(threadId, deps.map);
     if (!mapping) { await ctx.reply("No pane for this topic."); return; }
-    sendText(mapping.pane_id, "\x03"); // Ctrl+C
+    sendInterrupt(mapping.pane_id);
+    deps.turns?.abort(mapping.pane_id);
     await ctx.reply(`Interrupted ${mapping.label}`);
   });
 
@@ -188,8 +381,20 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
   });
 
   bot.command("trust", async (ctx) => {
+    const arg = (ctx.match ?? "").trim();
+    if (arg) {
+      const pane = findPaneByQuery(getAgents(), arg);
+      if (!pane) { await ctx.reply(`No agent matching "${arg}". Use /agents to see list.`); return; }
+      await handleAgentPicker(ctx, "trust", pane.pane_id);
+      return;
+    }
     const threadId = ctx.message?.message_thread_id;
-    if (!threadId) return;
+    if (!threadId) {
+      const panes = getAgents().filter((p) => p.status === "blocked");
+      if (panes.length === 0) { await ctx.reply("No blocked agents."); return; }
+      await ctx.reply("Trust which blocked agent?", { reply_markup: agentPicker("trust", panes) });
+      return;
+    }
     const mapping = findMapping(threadId, deps.map);
     if (!mapping) { await ctx.reply("No pane for this topic."); return; }
     sendText(mapping.pane_id, "trust, always allow");

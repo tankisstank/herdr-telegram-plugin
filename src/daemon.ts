@@ -14,9 +14,10 @@ import { parseActionCallback } from "./keyboards.js";
 import { formatLastReadback } from "./commands.js";
 import { cleanPaneOutput, stripStatusBar } from "./wait-loop.js";
 import { formatStatus } from "./commands.js";
-import { sendEscape } from "./herdr-client.js";
+import { sendEscape, sendKeys } from "./herdr-client.js";
 import type { DaemonState } from "./types.js";
 import * as path from "node:path";
+import { homedir } from "node:os";
 import { mkdirSync, writeFileSync } from "node:fs";
 
 export interface StartDaemonOptions {
@@ -47,7 +48,7 @@ export async function startDaemon(
   const log = createLogger("daemon");
   const cfg = loadConfig(opts.configDir);
   const statePath = opts.stateDir ?? path.join(
-    process.env.XDG_STATE_HOME ?? path.join(process.env.HOME ?? "/tmp", ".local", "state"),
+    process.env.XDG_STATE_HOME ?? path.join(homedir(), ".local", "state"),
     "herdr-telegram"
   );
 
@@ -114,6 +115,26 @@ export async function startDaemon(
 
   const turns = new TurnDispatcher();
   const follows = new FollowManager();
+  const pendingApprovalComments = new Map<number, { paneId: string; label: string }>();
+
+  function approvalResponseForKey(key: string): { kind: "text" | "key"; value: string } {
+    const normalized = key.toLowerCase();
+    if (["yes", "y"].includes(normalized)) return { kind: "text", value: "yes, single permission" };
+    if (["all", "p", "trust"].includes(normalized)) return { kind: "text", value: "trust, always allow" };
+    if (["no", "n"].includes(normalized)) return { kind: "text", value: "no (tab to edit)" };
+    if (["esc", "escape"].includes(normalized)) return { kind: "key", value: "Escape" };
+    return { kind: "text", value: key };
+  }
+
+  function sendApprovalResponse(paneId: string, key: string): string {
+    const response = approvalResponseForKey(key);
+    if (response.kind === "key") {
+      sendKeys(paneId, response.value);
+      return response.value;
+    }
+    sendText(paneId, response.value);
+    return response.value;
+  }
   /** Active background follow loops, keyed by threadId. Cancel the runner to stop. */
   const followLoops = new Map<number, { cancel: () => void }>();
 
@@ -167,6 +188,35 @@ export async function startDaemon(
       followLoops.get(threadId)?.cancel();
       followLoops.delete(threadId);
     },
+    startAgentTurn: (mapping, threadId, text) => {
+      if (deps.follows) deps.follows.touch(threadId);
+      if (turns.isBusy(mapping.pane_id)) {
+        try {
+          sendText(mapping.pane_id, text);
+        } catch (err) {
+          log.error("Direct selected send failed", {
+            paneId: mapping.pane_id,
+            threadId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+        }
+        return;
+      }
+      void turns.start(mapping.pane_id, async (signal) => {
+        try {
+          await runAgentTurn(mapping.pane_id, threadId, text, cfg, tg, state.authorized_chat_id!, { signal });
+        } catch (err) {
+          log.error("Selected agent turn failed", {
+            paneId: mapping.pane_id,
+            threadId,
+            message: err instanceof Error ? err.message : String(err),
+          });
+          if (!signal.aborted) {
+            await tg.sendMessage(state.authorized_chat_id!, threadId, "The bridge could not complete this agent turn. Please try again.");
+          }
+        }
+      });
+    },
     saveMappings: () => {
       const raw: DaemonState["thread_mappings"] = {};
       for (const [tid, m] of deps.map.entries()) raw[tid] = m;
@@ -194,7 +244,35 @@ export async function startDaemon(
     await next();
   });
 
+  tg.bot.on("message:text", async (ctx, next) => {
+    const threadId = ctx.message?.message_thread_id;
+    if (!threadId) return next();
+    const pending = pendingApprovalComments.get(threadId);
+    if (!pending) return next();
+    const text = ctx.message.text;
+    if (!text || text.startsWith("/")) return next();
+    pendingApprovalComments.delete(threadId);
+    try {
+      sendText(pending.paneId, text);
+      await ctx.reply(`Sent comment to ${pending.label}.`);
+    } catch (err) {
+      log.error("Approval comment send failed", {
+        paneId: pending.paneId,
+        threadId,
+        message: err instanceof Error ? err.message : String(err),
+      });
+      await ctx.reply("Failed to send comment to the agent.");
+    }
+  });
   registerCommands(tg.bot, deps);
+  try {
+    await tg.setCommands();
+    log.info("Telegram command menu registered");
+  } catch (err) {
+    log.warn("Could not register Telegram command menu", {
+      message: err instanceof Error ? err.message : String(err),
+    });
+  }
 
   // Don't crash on errors — log and continue
   tg.bot.catch((err) => {
@@ -239,7 +317,12 @@ export async function startDaemon(
       saveStateCallback,
       15_000,
       watcherController.signal,
-      deps
+      {
+        map: deps.map,
+        isPaneObserved: (paneId) =>
+          turns.isBusy(paneId) ||
+          follows.listAll().some((follow) => follow.mapping.pane_id === paneId),
+      }
     );
     log.info("watcher: lazily started after pair/reconcile");
   }
@@ -537,6 +620,50 @@ export async function startDaemon(
     // Inline-keyboard action buttons (Stop / Unfollow / Last / Status /
     // Follow Nm). They do not need a pane selection — the threadId in the
     // callback carries the binding context.
+    if (data.startsWith("resp|") || data.startsWith("respc|")) {
+      const [kind, key] = data.split("|");
+      const threadId = ctx.callbackQuery.message?.message_thread_id;
+      if (!threadId) {
+        await ctx.answerCallbackQuery({ text: "Use inside an agent topic." });
+        return;
+      }
+      const mapping = findMapping(threadId, deps.map);
+      if (!mapping) {
+        await ctx.answerCallbackQuery({ text: "Thread not bound." });
+        return;
+      }
+      try {
+        if (kind === "respc") {
+          sendApprovalResponse(mapping.pane_id, key || "esc");
+          pendingApprovalComments.set(threadId, { paneId: mapping.pane_id, label: mapping.label });
+          await ctx.answerCallbackQuery({ text: "Waiting for comment." });
+          try {
+            await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+          } catch {
+            // Best effort; Telegram may reject edits on old messages.
+          }
+          await ctx.api.sendMessage(ctx.chat!.id, `Type your comment for ${mapping.label}. It will be sent to the agent.`, { message_thread_id: threadId });
+          return;
+        }
+        const sent = sendApprovalResponse(mapping.pane_id, key || "yes");
+        await ctx.answerCallbackQuery({ text: `Sent ${key}.` });
+        try {
+          await ctx.editMessageReplyMarkup({ reply_markup: undefined });
+        } catch {
+          // Best effort; Telegram may reject edits on old messages.
+        }
+        await ctx.api.sendMessage(ctx.chat!.id, `Sent: ${sent}`, { message_thread_id: threadId });
+      } catch (err) {
+        log.error("Approval callback failed", {
+          key,
+          paneId: mapping.pane_id,
+          threadId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        await ctx.answerCallbackQuery({ text: "Failed." });
+      }
+      return;
+    }
     if (data.startsWith("act:")) {
       const parsed = parseActionCallback(data);
       if (!parsed) {
