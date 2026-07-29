@@ -35,13 +35,13 @@ function isContinuation(line: string): boolean {
   if (!trimmed) return false;
   if (BULLET_START.test(line)) return false;
   if (/^\s*[›>]\s/.test(line)) return false;
-  if (/^\s*\d+[.)]\s/.test(line)) return false;
+  if (/^\s*\d+[.)]\s/.test(line) && (/\((?:[a-z]|esc)\)\s*$/i.test(trimmed) || /^(?:Yes|No|Cancel|Approve|Allow|Deny|Continue|Stop)\b/i.test(trimmed.replace(/^\d+[.)]\s+/, "")))) return false;
   if (/^[─━═]{10,}/.test(trimmed)) return false;
   if (/^(?:Status:|Working\b|Would you like\b|Do you want\b|Press enter\b)/i.test(trimmed)) return false;
   if (/^[└│].*/.test(trimmed) || /^\.\.\. \+\d+/.test(trimmed)) return false;
   if (/^(?:ctx_\w+|Model:|LSPs? are disabled|<session_|<\/?[a-z_])/i.test(trimmed)) return false;
   // Final narrative may continue as plain prose or Markdown at column zero.
-  return /^\s{2,}\S/.test(line) || /^[-*#`]\s+\S/.test(trimmed) || /^[A-Za-zÀ-ỹĐđ].{2,}/.test(trimmed);
+  return /^\s{2,}\S/.test(line) || /^[-*#`]\s+\S/.test(trimmed) || /^\d+[.)]\s+\S/.test(trimmed) || /^[A-Za-zÀ-ỹĐđ].{2,}/.test(trimmed);
 }
 
 function isThinkingBlock(block: string): boolean {
@@ -57,7 +57,18 @@ export function extractThinkingBlocks(raw: string): string[] {
   for (let index = 0; index < lines.length; index++) {
     if (!BULLET_START.test(lines[index])) continue;
     const block = [lines[index].trimStart()];
-    while (index + 1 < lines.length && isContinuation(lines[index + 1])) {
+    while (index + 1 < lines.length) {
+      const nextLine = lines[index + 1];
+      if (!nextLine.trim()) {
+        const followingLine = lines[index + 2];
+        if (followingLine && isContinuation(followingLine)) {
+          block.push("");
+          index++;
+          continue;
+        }
+        break;
+      }
+      if (!isContinuation(nextLine)) break;
       block.push(lines[++index].trimEnd());
     }
     const rendered = block.join("\n");

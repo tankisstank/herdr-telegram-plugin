@@ -49,6 +49,24 @@ describe("extractThinkingBlocks", () => {
     ]);
   });
 
+  it("keeps numbered Markdown lists in the final narrative", () => {
+    const raw = [
+      "• Đã kiểm tra 3 ảnh. Bước Research đang có lỗi UI nghiêm trọng về tương phản:",
+      "",
+      "1. Banner READY ở đầu trang",
+      "",
+      "- Chữ xanh lime đặt trên nền gần trắng.",
+      "- Độ tương phản rất thấp, khó đọc.",
+      "",
+      "2. Evidence review",
+      "Status: working -> done",
+    ].join("\n");
+
+    expect(extractThinkingBlocks(raw)).toEqual([
+      "• Đã kiểm tra 3 ảnh. Bước Research đang có lỗi UI nghiêm trọng về tương phản:\n\n1. Banner READY ở đầu trang\n\n- Chữ xanh lime đặt trên nền gần trắng.\n- Độ tương phản rất thấp, khó đọc.\n\n2. Evidence review",
+    ]);
+  });
+
 describe("ThinkingRelayTracker", () => {
   it("uses the first pane read as a baseline and emits only appended bullets", () => {
     const tracker = new ThinkingRelayTracker();
