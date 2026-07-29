@@ -118,12 +118,14 @@ export async function startDaemon(
   const pendingApprovalComments = new Map<number, { paneId: string; label: string }>();
 
   function approvalResponseForKey(key: string): { kind: "text" | "key"; value: string } {
-    const normalized = key.toLowerCase();
-    if (["yes", "y"].includes(normalized)) return { kind: "text", value: "yes, single permission" };
-    if (["all", "p", "trust"].includes(normalized)) return { kind: "text", value: "trust, always allow" };
-    if (["no", "n"].includes(normalized)) return { kind: "text", value: "no (tab to edit)" };
+    const normalized = key.trim().toLowerCase();
+    // Approval callbacks must send the actual TUI shortcut. Sending the
+    // human-readable option label makes the agent echo that label as input.
+    if (["yes", "y"].includes(normalized)) return { kind: "text", value: "y" };
+    if (["all", "p", "trust"].includes(normalized)) return { kind: "text", value: "p" };
+    if (["no", "n"].includes(normalized)) return { kind: "text", value: "n" };
     if (["esc", "escape"].includes(normalized)) return { kind: "key", value: "Escape" };
-    return { kind: "text", value: key };
+    return { kind: "text", value: normalized };
   }
 
   function sendApprovalResponse(paneId: string, key: string): string {
@@ -132,6 +134,7 @@ export async function startDaemon(
       sendKeys(paneId, response.value);
       return response.value;
     }
+    // pane run sends the printable shortcut followed by Enter.
     sendText(paneId, response.value);
     return response.value;
   }
