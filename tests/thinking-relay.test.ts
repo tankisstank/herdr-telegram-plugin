@@ -36,6 +36,19 @@ describe("extractThinkingBlocks", () => {
   });
 });
 
+  it("keeps the complete final narrative after a bullet heading", () => {
+    const raw = [
+      "• Đã thêm nút trong topic Quản trị:",
+      "Các nút mới hỗ trợ pause và resume.",
+      "- Đã cập nhật API và kiểm thử.",
+      "Status: working -> done",
+    ].join("\n");
+
+    expect(extractThinkingBlocks(raw)).toEqual([
+      "• Đã thêm nút trong topic Quản trị:\nCác nút mới hỗ trợ pause và resume.\n- Đã cập nhật API và kiểm thử.",
+    ]);
+  });
+
 describe("ThinkingRelayTracker", () => {
   it("uses the first pane read as a baseline and emits only appended bullets", () => {
     const tracker = new ThinkingRelayTracker();

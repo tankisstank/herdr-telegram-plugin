@@ -31,12 +31,17 @@ function appendedContent(previous: string, current: string): string {
 }
 
 function isContinuation(line: string): boolean {
-  if (!line.trim()) return false;
+  const trimmed = line.trim();
+  if (!trimmed) return false;
   if (BULLET_START.test(line)) return false;
   if (/^\s*[›>]\s/.test(line)) return false;
   if (/^\s*\d+[.)]\s/.test(line)) return false;
-  if (/^[─━═]{10,}/.test(line.trim())) return false;
-  return /^\s{2,}\S/.test(line);
+  if (/^[─━═]{10,}/.test(trimmed)) return false;
+  if (/^(?:Status:|Working\b|Would you like\b|Do you want\b|Press enter\b)/i.test(trimmed)) return false;
+  if (/^[└│].*/.test(trimmed) || /^\.\.\. \+\d+/.test(trimmed)) return false;
+  if (/^(?:ctx_\w+|Model:|LSPs? are disabled|<session_|<\/?[a-z_])/i.test(trimmed)) return false;
+  // Final narrative may continue as plain prose or Markdown at column zero.
+  return /^\s{2,}\S/.test(line) || /^[-*#`]\s+\S/.test(trimmed) || /^[A-Za-zÀ-ỹĐđ].{2,}/.test(trimmed);
 }
 
 function isThinkingBlock(block: string): boolean {
