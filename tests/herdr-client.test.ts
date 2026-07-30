@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   parseAgentList,
   buildSendTextArgs,
+  buildSubmitTextArgs,
   buildSendKeysArgs,
   buildWaitArgs,
   herdrBin,
@@ -98,9 +99,17 @@ describe("parseAgentList", () => {
 });
 
 describe("buildSendTextArgs", () => {
-  it("builds correct args tuple", () => {
+  it("builds a literal text args tuple without relying on pane run", () => {
     expect(buildSendTextArgs("w1:pZ", "hello world")).toEqual([
-      "pane", "run", "w1:pZ", "hello world",
+      "pane", "send-text", "w1:pZ", "hello world",
+    ]);
+  });
+});
+
+describe("buildSubmitTextArgs", () => {
+  it("builds an explicit Enter keypress after literal text", () => {
+    expect(buildSubmitTextArgs("w1:pZ")).toEqual([
+      "pane", "send-keys", "w1:pZ", "Enter",
     ]);
   });
 });

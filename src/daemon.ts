@@ -134,7 +134,7 @@ export async function startDaemon(
       sendKeys(paneId, response.value);
       return response.value;
     }
-    // pane run sends the printable shortcut followed by Enter.
+    // sendText sends the printable shortcut followed by an explicit Enter.
     sendText(paneId, response.value);
     return response.value;
   }

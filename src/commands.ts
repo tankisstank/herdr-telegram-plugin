@@ -381,7 +381,7 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     // killing the agent process. For a hard interrupt, use /interrupt.
     //
     // Uses herdr pane send-keys with the named 'Escape' key. Raw ESC
-    // bytes via 'pane run' are interpreted as the start of an ANSI CSI
+    // bytes sent as terminal text are interpreted as the start of an ANSI CSI
     // sequence and silently swallowed; send-keys routes the named key
     // through the terminal input pipeline and triggers the real handler.
     //

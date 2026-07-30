@@ -176,15 +176,22 @@ export function getAgents(): PaneInfo[] {
 }
 
 export function buildSendTextArgs(paneId: string, text: string): string[] {
-  return ["pane", "run", paneId, text];
+  return ["pane", "send-text", paneId, text];
+}
+
+export function buildSubmitTextArgs(paneId: string): string[] {
+  return ["pane", "send-keys", paneId, "Enter"];
 }
 
 export function sendText(paneId: string, text: string): void {
   execHerdr(buildSendTextArgs(paneId, text));
+  // `pane run` has not consistently submitted text across Herdr versions.
+  // Use the explicit transport operations so Telegram prompts always start.
+  execHerdr(buildSubmitTextArgs(paneId));
 }
 
 // `herdr pane send-keys` accepts named keys (Escape, Enter, Up, Down, etc.)
-// instead of raw bytes. Raw ESC sent via `pane run` is interpreted as the
+// instead of raw bytes. Raw ESC sent as terminal text is interpreted as the
 // start of an ANSI CSI sequence (ESC + control char) and silently swallowed
 // by the agent TUI; send-keys routes the named key through the terminal
 // input pipeline and triggers the agent's real ESC handler.
