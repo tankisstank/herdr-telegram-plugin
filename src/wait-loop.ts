@@ -155,6 +155,12 @@ export async function runAgentTurn(
   const opts = typeof maxOutputLinesOrOptions === "number" ? { maxOutputLines: maxOutputLinesOrOptions } : maxOutputLinesOrOptions;
   const stabilityMs = opts.stabilityWindowMs ?? cfg.stabilityWindowMs;
   const maxOutputLines = opts.maxOutputLines ?? 1_000;
+  let initialSnapshot = "";
+  try {
+    initialSnapshot = (opts.deps?.readPane ?? readPane)(paneId, maxOutputLines);
+  } catch {
+    // The observe loop will establish its own baseline when Herdr is busy.
+  }
 
   // Submit the prompt immediately — pass-through to the pane.
   (opts.deps?.sendText ?? sendText)(paneId, text);
@@ -170,6 +176,7 @@ export async function runAgentTurn(
     tg,
     chatId,
     maxOutputLines,
+    initialSnapshot,
     signal: opts.signal,
     stopCondition: { kind: "idle", stabilityMs },
     output: {

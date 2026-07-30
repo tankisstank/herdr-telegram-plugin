@@ -51,6 +51,7 @@ function describePollingError(err: unknown): string {
 export class TelegramClient {
   public bot: Bot;
   private pollingTask?: Promise<void>;
+  private readonly sendQueues = new Map<string, Promise<void>>();
   private stopped = false;
   private retryTimer?: ReturnType<typeof setTimeout>;
   private retryWake?: () => void;
@@ -186,12 +187,29 @@ export class TelegramClient {
     text: string,
     opts?: { disable_notification?: boolean; reply_markup?: unknown }
   ): Promise<number> {
-    const msg = await this.bot.api.sendMessage(chatId, text, {
-      message_thread_id: threadId,
-      disable_notification: opts?.disable_notification ?? false,
-      reply_markup: opts?.reply_markup as any,
+    const queueKey = `${chatId}:${threadId}`;
+    const previous = this.sendQueues.get(queueKey) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(async () => {
+      const msg = await this.bot.api.sendMessage(chatId, text, {
+        message_thread_id: threadId,
+        disable_notification: opts?.disable_notification ?? false,
+        reply_markup: opts?.reply_markup as any,
+      });
+      return msg.message_id;
     });
-    return msg.message_id;
+    const tail = task.then(() => undefined, () => undefined);
+    this.sendQueues.set(queueKey, tail);
+    try {
+      return await task;
+    } finally {
+      if (this.sendQueues.get(queueKey) === tail) this.sendQueues.delete(queueKey);
+    }
+  }
+
+  async clearMessageKeyboard(chatId: number, messageId: number): Promise<void> {
+    await this.bot.api.editMessageReplyMarkup(chatId, messageId, {
+      reply_markup: undefined,
+    });
   }
 
   async validatePermissions(chatId: number): Promise<string[]> {
@@ -200,10 +218,12 @@ export class TelegramClient {
     try {
       const chat = await this.bot.api.getChat(chatId);
       const chatType = chat.type;
-      // Allow private chats, groups, and supergroups (with or without topics).
-      // Only supergroups with is_forum require admin + can_manage_topics.
-      // Private chats only need the chat to be reachable.
-      if (chatType === "supergroup" && chat.is_forum) {
+      // Some Telegram API responses omit is_forum even for an existing
+      // forum supergroup. Reject an explicit false value, but let the
+      // subsequent topic reconciliation verify older/partial responses.
+      if (chatType !== "supergroup" || (chat as { is_forum?: boolean }).is_forum === false) {
+        errors.push("This bridge requires a Telegram Forum supergroup. Enable Topics in Group Settings, then pair again from that forum.");
+      } else {
         try {
           const me = await this.bot.api.getMe();
           const member = await this.bot.api.getChatMember(chatId, me.id);
@@ -221,11 +241,7 @@ export class TelegramClient {
         } catch (err: any) {
           errors.push(`Cannot check bot permissions. ${err.message}`);
         }
-      } else if (chatType === "group") {
-        // Legacy group (no forum) — bot just needs to be reachable.
-        // No admin requirement; user already started the bot.
       }
-      // private / channel: no extra checks
     } catch (err: any) {
       errors.push(
         `Cannot access chat. Make sure the bot has been added. (${err.message})`

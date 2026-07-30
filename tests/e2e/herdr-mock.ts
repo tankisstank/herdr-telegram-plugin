@@ -176,7 +176,7 @@ export class MockHerdr {
 
   constructor(initial?: Partial<HerdrMockState>) {
     this.dir = mkdtempSync(join(tmpdir(), "herdr-mock-"));
-    this.bin = join(this.dir, "herdr");
+    this.bin = join(this.dir, "herdr-mock.js");
     this.statePath = join(this.dir, "state.json");
     writeFileSync(this.bin, SCRIPT_HEADER);
     chmodSync(this.bin, 0o755);
@@ -238,7 +238,7 @@ export class MockHerdr {
   /** Run the mock herdr binary in a child process. Helper for tests that
    *  need to inspect the resulting state. */
   run(args: string[]): SpawnSyncReturns<string> {
-    return spawnSync(this.bin, args, {
+    return spawnSync(process.execPath, [this.bin, ...args], {
       encoding: "utf8",
       env: { ...process.env, MOCK_HERDR_STATE: this.statePath },
     });

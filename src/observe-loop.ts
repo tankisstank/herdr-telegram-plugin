@@ -9,7 +9,8 @@
 import type { TelegramClient } from "./telegram-client.js";
 import type { Config } from "./config.js";
 import { stripStatusBar } from "./wait-loop.js";
-import { readPane as herdrReadPane } from "./herdr-client.js";
+import { getAgentInfo, readPane as herdrReadPane } from "./herdr-client.js";
+import type { PaneInfo } from "./types.js";
 
 export interface ObserveLoopDeps {
   readPane: (paneId: string, lines: number) => string;
@@ -21,6 +22,7 @@ export interface ObserveLoopDeps {
   ) => Promise<number>;
   sleep: (ms: number) => Promise<void>;
   now: () => number;
+  getAgentStatus: (paneId: string) => PaneInfo["status"];
 }
 
 // --- Stop conditions -------------------------------------------------------
@@ -64,6 +66,8 @@ export interface ObserveOutputFormatter {
   workingKeyboard?: () => unknown;
   /** Inline keyboard attached to the final/expired/aborted message. */
   finalKeyboard?: () => unknown;
+  /** Used when a normal turn exceeds its configured hard deadline. */
+  timeoutMessage?: () => string;
 }
 
 // --- Public entry point ----------------------------------------------------
@@ -78,6 +82,8 @@ export interface RunObserveLoopOptions {
   output: ObserveOutputFormatter;
   signal?: AbortSignal;
   maxOutputLines?: number;
+  /** Snapshot taken immediately before the prompt is submitted. */
+  initialSnapshot?: string;
   deps?: Partial<ObserveLoopDeps>;
 }
 
@@ -87,12 +93,13 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
     sendMessage: opts.deps?.sendMessage ?? defaultSendMessage(opts.tg),
     sleep: opts.deps?.sleep ?? defaultSleep,
     now: opts.deps?.now ?? (() => Date.now()),
+    getAgentStatus: opts.deps?.getAgentStatus ?? defaultGetAgentStatus,
   };
 
   const maxLines = opts.maxOutputLines ?? 4_000;
   const tickMs = opts.cfg.progressIntervalMs;
 
-  let lastSnapshot = readSnapshot(opts.paneId, maxLines, deps);
+  let lastSnapshot = opts.initialSnapshot ?? readSnapshot(opts.paneId, maxLines, deps);
   // Tracks the most recent non-empty delta we emitted. When the agent
   // finishes by clearing the pane (a common pattern in pi/codex), the
   // post-clean snapshot is empty, but the actual response is what we
@@ -101,6 +108,8 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
   let lastDeltaText = "";
   let lastChangeAt = deps.now();
   const startedAt = lastChangeAt;
+  const maxWaitMs = Math.max(0, opts.cfg.maxTotalWaitS) * 1000;
+  let progressUpdates = 0;
 
   while (true) {
     if (opts.signal?.aborted) {
@@ -116,6 +125,22 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
 
     const current = readSnapshot(opts.paneId, maxLines, deps);
     const elapsedSec = Math.floor((deps.now() - startedAt) / 1000);
+    const agentStatus = deps.getAgentStatus(opts.paneId);
+
+    // A stable permission dialog is not a completed turn. The watcher owns
+    // rendering its approval controls; leave this loop without publishing a
+    // misleading final response.
+    if (isIdle(opts.stopCondition) && agentStatus === "blocked") return;
+
+    if (isIdle(opts.stopCondition) && maxWaitMs > 0 && deps.now() - startedAt >= maxWaitMs) {
+      await deps.sendMessage(
+        opts.chatId,
+        opts.threadId,
+        opts.output.timeoutMessage?.() ?? "⚠️ Timed out waiting for the agent response.",
+        { reply_markup: opts.output.finalKeyboard?.() },
+      );
+      return;
+    }
 
     // A pane clear (e.g. agent redraw) is a real change, but the agent
     // has stopped emitting new content. Treat clears as 'not working' so
@@ -129,15 +154,21 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
       opts.stopCondition.kind === "follow"
         ? computeFollowExpiresInMs(opts.stopCondition, deps.now())
         : undefined;
-    await deps.sendMessage(
-      opts.chatId,
-      opts.threadId,
-      opts.output.workingTick({ elapsedSec, followExpiresInMs }),
-      {
-        disable_notification: true,
-        reply_markup: opts.output.workingKeyboard?.(),
-      },
-    );
+    if (
+      opts.cfg.maxProgressUpdates < 0 ||
+      progressUpdates < opts.cfg.maxProgressUpdates
+    ) {
+      progressUpdates++;
+      await deps.sendMessage(
+        opts.chatId,
+        opts.threadId,
+        opts.output.workingTick({ elapsedSec, followExpiresInMs }),
+        {
+          disable_notification: true,
+          reply_markup: opts.output.workingKeyboard?.(),
+        },
+      );
+    }
 
     // Pane change — emit a delta on its own message. We compute a byte-level
     // diff so long, no-op periods do not produce duplicate output.
@@ -163,7 +194,10 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
     // Stop condition checks.
     if (opts.stopCondition.kind === "idle") {
       const stabilityMs = opts.stopCondition.stabilityMs;
-      if (deps.now() - lastChangeAt >= stabilityMs) {
+      if (
+        (agentStatus === "idle" || agentStatus === "done" || agentStatus === "unknown") &&
+        deps.now() - lastChangeAt >= stabilityMs
+      ) {
         await finalize(opts, deps, lastSnapshot, "idle", lastDeltaText);
         return;
       }
@@ -234,6 +268,14 @@ function defaultReadPane(paneId: string, lines: number): string {
   // deps?.readPane so this path is never reached in tests; no spawnSync
   // cost is paid unless production code actually runs.
   return herdrReadPane(paneId, lines);
+}
+
+function defaultGetAgentStatus(paneId: string): PaneInfo["status"] {
+  try {
+    return (getAgentInfo(paneId)?.agent_status ?? "unknown") as PaneInfo["status"];
+  } catch {
+    return "unknown";
+  }
 }
 
 function defaultSendMessage(tg: TelegramClient) {

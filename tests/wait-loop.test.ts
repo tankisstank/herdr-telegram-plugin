@@ -258,7 +258,7 @@ describe("runAgentTurn (PR #10 observe-loop engine)", () => {
   //   - Final consolidated: `✅ (Xs):\n\n<pane content>`
   // Tests below exercise the new contract.
 
-  it("sends the prompt immediately (pass-through) before polling", async () => {
+  it("captures a baseline before submitting, then polls the submitted turn", async () => {
     const order: string[] = [];
     let readCalls = 0;
     const base = "old content";
@@ -282,7 +282,8 @@ describe("runAgentTurn (PR #10 observe-loop engine)", () => {
       pollIntervalMs: 100,
       stabilityWindowMs: 100,
     });
-    expect(order[0]).toBe("sendText");
+    expect(order[0]).toBe("readPane");
+    expect(order).toContain("sendText");
     expect(order.filter((s) => s.startsWith("readPane")).length).toBeGreaterThanOrEqual(1);
     expect(tg.sent.some((m) => m.text.includes("agent response line"))).toBe(true);
     expect(tg.sent[tg.sent.length - 1].text.startsWith("✅")).toBe(true);

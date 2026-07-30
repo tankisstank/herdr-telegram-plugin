@@ -144,4 +144,167 @@ describe("syncTabs message ordering", () => {
       expect.stringContaining("needs input (working -> blocked)"),
     ]);
   });
+
+  it("sends a new approval prompt even when the pane remains blocked", async () => {
+    const pane = makePane({
+      tab_id: "w1:tA",
+      pane_id: "w1:pA",
+      label: "Test",
+      status: "blocked",
+    });
+    let output = [
+      "Would you like to run the following command?",
+      "$ git merge --abort",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "Press enter to confirm or esc to cancel",
+    ].join("\n");
+    const sent: string[] = [];
+    const cleared: Array<{ chatId: number; messageId: number }> = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string) => {
+        sent.push(text);
+        return sent.length;
+      },
+      clearMessageKeyboard: async (chatId: number, messageId: number) => {
+        cleared.push({ chatId, messageId });
+      },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {},
+      known_tabs: {
+        [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" },
+      },
+    };
+    const deps = {
+      map: new Map(),
+      getAgents: () => [pane],
+      readPane: () => output,
+    };
+
+    await syncTabs(1, telegram as any, state, deps);
+    output = [
+      output,
+      "Merge aborted.",
+      "Would you like to run the following command?",
+      "$ git merge --no-ff feature/audit",
+      "› 1. Yes, proceed (y)",
+      "  2. Yes, and don't ask again (p)",
+      "  3. No, and tell Codex what to do differently (esc)",
+      "Press enter to confirm or esc to cancel",
+    ].join("\n");
+    await syncTabs(1, telegram as any, state, deps);
+
+    expect(sent).toHaveLength(2);
+    expect(sent[0]).toContain("git merge --abort");
+    expect(sent[1]).toContain("has a new input request");
+    expect(sent[1]).toContain("git merge --no-ff feature/audit");
+    expect(sent[1]).not.toContain("git merge --abort");
+    expect(cleared).toEqual([{ chatId: 1, messageId: 1 }]);
+  });
+
+  it("retries a blocked pane until its options have rendered", async () => {
+    const pane = makePane({
+      tab_id: "w1:tA",
+      pane_id: "w1:pA",
+      label: "Test",
+      status: "blocked",
+    });
+    let output = "Would you like to run the following command?\n$ git merge --abort";
+    const sent: string[] = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string) => {
+        sent.push(text);
+        return sent.length;
+      },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {},
+      known_tabs: {
+        [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" },
+      },
+    };
+    const deps = {
+      map: new Map(),
+      getAgents: () => [pane],
+      readPane: () => output,
+    };
+
+    await syncTabs(1, telegram as any, state, deps);
+    expect(sent).toEqual([]);
+    expect(state.known_tabs[pane.tab_id].last_blocked_prompt_fingerprint).toBeUndefined();
+
+    output = [
+      output,
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "Press enter to confirm or esc to cancel",
+    ].join("\n");
+    await syncTabs(1, telegram as any, state, deps);
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("git merge --abort");
+    expect(state.known_tabs[pane.tab_id].last_blocked_prompt_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("keeps all options when a long option wraps across terminal lines", async () => {
+    const pane = makePane({
+      tab_id: "w1:tA",
+      pane_id: "w1:pA",
+      label: "Test",
+      status: "blocked",
+    });
+    const output = [
+      "Would you like to run the following command?",
+      "  Environment: local",
+      "  Reason: Bạn có muốn cho phép đọc helper derive canary đã merge không?",
+      "  $ $lines = Get-Content 'app\\scripts\\lib\\wingsSideTourEditorialProduction.ts'; $start = (Select-String -Path",
+      "  'app\\scripts\\lib\\wingsSideTourEditorialProduction.ts' -Pattern '^export const deriveWingsSideTourEditorialCanaryPlan').LineNumber;",
+      "  $lines[($start-1)..($start+120)]",
+      "› 1. Yes, proceed (y)",
+      "  2. Yes, and don't ask again for commands that start with `$lines = Get-Content",
+      "     'app\\scripts\\lib\\wingsSideTourEditorialProduction.ts'; $start = (Select-String -Path",
+      "     'app\\scripts\\lib\\wingsSideTourEditorialProduction.ts' -Pattern '^export const",
+      "     deriveWingsSideTourEditorialCanaryPlan').LineNumber; $lines[($start-1)..($start+120)]` (p)",
+      "  3. No, and tell Codex what to do differently (esc)",
+      "  Press enter to confirm or esc to cancel",
+    ].join("\n");
+    const sent: Array<{ text: string; opts?: any }> = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string, opts?: any) => {
+        sent.push({ text, opts });
+        return sent.length;
+      },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {},
+      known_tabs: {
+        [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" },
+      },
+    };
+
+    await syncTabs(1, telegram as any, state, {
+      map: new Map(),
+      getAgents: () => [pane],
+      readPane: () => output,
+    });
+
+    const buttons = sent[0].opts.reply_markup.inline_keyboard[0];
+    expect(buttons.map((button: { text: string }) => button.text)).toEqual([
+      "Yes",
+      "All",
+      "No + comment",
+    ]);
+    const callbackData = buttons.map((button: { callback_data: string }) => button.callback_data);
+    expect(callbackData[0]).toMatch(/^resp\|[a-f0-9]{12}\|y$/);
+    expect(callbackData[1]).toMatch(/^resp\|[a-f0-9]{12}\|p$/);
+    expect(callbackData[2]).toMatch(/^respc\|[a-f0-9]{12}\|esc$/);
+    expect(new Set(callbackData.map((value: string) => value.split("|")[1]))).toHaveLength(1);
+  });
 });

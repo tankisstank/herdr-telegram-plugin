@@ -63,9 +63,23 @@ function describeError(args: string[]): string {
   return `herdr ${args.join(" ")}`;
 }
 
+/**
+ * HERDR_BIN_PATH normally points at the native herdr executable. Supporting
+ * a JavaScript entry point as well keeps local development and the Windows
+ * test harness shell-free: Node receives each argument separately, so prompt
+ * text is never interpolated into a command string.
+ */
+function herdrCommand(bin: string, args: string[]): { command: string; args: string[] } {
+  if (/\.(?:cjs|mjs|js)$/i.test(bin)) {
+    return { command: process.execPath, args: [bin, ...args] };
+  }
+  return { command: bin, args };
+}
+
 function execHerdrJson(args: string[]): string {
   const bin = herdrBin();
-  const result = spawnSync(bin, args, {
+  const command = herdrCommand(bin, args);
+  const result = spawnSync(command.command, command.args, {
     encoding: "utf8",
     timeout: 30_000,
     stdio: ["ignore", "pipe", "pipe"],
@@ -87,7 +101,8 @@ function execHerdrJson(args: string[]): string {
 
 function execHerdr(args: string[]): void {
   const bin = herdrBin();
-  const result = spawnSync(bin, args, {
+  const command = herdrCommand(bin, args);
+  const result = spawnSync(command.command, command.args, {
     encoding: "utf8",
     timeout: 30_000,
     stdio: ["ignore", "pipe", "pipe"],
@@ -286,7 +301,8 @@ export function getAgentInfo(target: string): AgentInfo | null {
 
 export function spawnDaemon(args: string[], herdrBinPath?: string): ChildProcess {
   const bin = herdrBinPath || herdrBin();
-  const child = spawn(bin, args, {
+  const command = herdrCommand(bin, args);
+  const child = spawn(command.command, command.args, {
     detached: true,
     stdio: "ignore",
   });

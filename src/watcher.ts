@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type { DaemonState, PaneInfo, ThreadMapping } from "./types.js";
 import type { TelegramClient } from "./telegram-client.js";
 import { getAgents, readPane } from "./herdr-client.js";
@@ -35,15 +36,15 @@ function optionButtonText(option: PromptOption): string {
   return option.label.length > 28 ? option.label.slice(0, 25) + "..." : option.label;
 }
 
-function promptKeyboard(options: PromptOption[]) {
+function promptKeyboard(options: PromptOption[], promptId: string) {
   const buttons = options.slice(0, 6).map((option) => ({
     text: optionButtonText(option),
-    callback_data: `${option.wantsComment ? "respc" : "resp"}|${option.key}`,
+    callback_data: `${option.wantsComment ? "respc" : "resp"}|${promptId}|${option.key}`,
   }));
   return { inline_keyboard: buttons.length ? [buttons] : [[
-    { text: "Yes", callback_data: "resp|yes" },
-    { text: "All", callback_data: "resp|all" },
-    { text: "No + comment", callback_data: "respc|esc" },
+    { text: "Yes", callback_data: `resp|${promptId}|yes` },
+    { text: "All", callback_data: `resp|${promptId}|all` },
+    { text: "No + comment", callback_data: `respc|${promptId}|esc` },
   ]] };
 }
 
@@ -56,13 +57,14 @@ function parseOption(line: string): PromptOption | null {
   const keyMatch = label.match(/\(([^()]+)\)\s*$/);
   const key = keyMatch ? keyMatch[1].trim().toLowerCase() : index;
   if (keyMatch) label = label.slice(0, keyMatch.index).trim();
-  const wantsComment = /tell .* differently|what to do differently|comment|reason|edit/i.test(label);
+  const wantsComment = /tell .* differently|what to do differently|\bcomment\b|\breason\b|\bedit\b/i.test(label);
   return { index, label, key, wantsComment };
 }
 
 function extractInteractivePrompt(raw: string): InteractivePrompt {
   const allLines = raw.split("\n").map((line) => line.trimEnd());
   const optionLines: Array<{ line: string; index: number; option: PromptOption }> = [];
+  const promptHeaderPattern = /^(Would you like|Do you want|Choose|Select|Which|How should|What should|Bạn có muốn|Hãy chọn|Chọn)/i;
   for (let i = 0; i < allLines.length; i++) {
     const option = parseOption(allLines[i]);
     if (option) optionLines.push({ line: allLines[i], index: i, option });
@@ -72,21 +74,54 @@ function extractInteractivePrompt(raw: string): InteractivePrompt {
     return { text: fallback.length > 1400 ? fallback.slice(-1400) : fallback, options: [] };
   }
 
-  const firstOptionIndex = optionLines[0].index;
-  let start = Math.max(0, firstOptionIndex - 12);
-  for (let i = firstOptionIndex - 1; i >= 0; i--) {
-    const line = allLines[i].trim();
-    if (!line) continue;
-    if (/^(Would you like|Do you want|Choose|Select|Which|How should|What should|Bạn có muốn|Hãy chọn|Chọn)/i.test(line)) {
+  // Anchor to the newest question header. Long commands and option labels wrap
+  // over several terminal lines, so physical line adjacency cannot delimit an
+  // option group reliably.
+  let start = -1;
+  for (let i = allLines.length - 1; i >= 0; i--) {
+    if (promptHeaderPattern.test(allLines[i].trim())) {
       start = i;
       break;
     }
   }
-
-  let end = optionLines.at(-1)!.index + 1;
-  for (let i = end; i < Math.min(allLines.length, end + 4); i++) {
-    if (/Press enter|confirm|cancel/i.test(allLines[i])) end = i + 1;
+  const currentOptions = start >= 0
+    ? optionLines.filter((entry) => entry.index > start)
+    : optionLines;
+  if (currentOptions.length === 0) {
+    const fallbackLines = start >= 0 ? allLines.slice(start) : allLines;
+    const fallback = fallbackLines.filter((line) => line.trim()).slice(-18).join("\n").trim();
+    return { text: fallback.length > 1400 ? fallback.slice(-1400) : fallback, options: [] };
   }
+
+  const lastOptionIndex = currentOptions.at(-1)!.index;
+  let end = lastOptionIndex + 1;
+  let optionBlockEnd = end;
+  for (let i = end; i < allLines.length; i++) {
+    if (/Press enter|confirm|cancel/i.test(allLines[i])) {
+      optionBlockEnd = i;
+      end = i + 1;
+      break;
+    }
+  }
+  const trailingLines = allLines.slice(end).filter((line) => line.trim());
+  if (trailingLines.some((line) => !/Press enter|confirm|cancel/i.test(line))) {
+    const fallback = allLines.filter((line) => line.trim()).slice(-18).join("\n").trim();
+    return { text: fallback.length > 1400 ? fallback.slice(-1400) : fallback, options: [] };
+  }
+
+  const firstOptionIndex = currentOptions[0].index;
+  if (start < 0) {
+    start = Math.max(0, firstOptionIndex - 12);
+  }
+  const parsedOptions = currentOptions.map((entry, index) => {
+    const nextOptionIndex = currentOptions[index + 1]?.index ?? optionBlockEnd;
+    const wrapped = allLines
+      .slice(entry.index, nextOptionIndex)
+      .filter((line) => line.trim())
+      .map((line) => line.trim())
+      .join(" ");
+    return parseOption(wrapped) ?? entry.option;
+  });
 
   const text = allLines
     .slice(start, end)
@@ -95,8 +130,22 @@ function extractInteractivePrompt(raw: string): InteractivePrompt {
     .trim();
   return {
     text: text.length > 1800 ? text.slice(-1800) : text,
-    options: optionLines.map((entry) => entry.option),
+    options: parsedOptions,
   };
+}
+
+function promptFingerprint(prompt: InteractivePrompt): string | undefined {
+  if (!prompt.text || prompt.options.length === 0) return undefined;
+  const normalized = JSON.stringify({
+    text: prompt.text.replace(/\s+/g, " ").trim(),
+    options: prompt.options.map(({ index, label, key, wantsComment }) => ({
+      index,
+      label: label.replace(/\s+/g, " ").trim(),
+      key,
+      wantsComment,
+    })),
+  });
+  return createHash("sha256").update(normalized).digest("hex");
 }
 
 function blockedPrompt(
@@ -113,13 +162,16 @@ function blockedPrompt(
 function blockedMessage(
   pane: PaneInfo,
   previous: PaneInfo["status"],
-  paneReader?: (paneId: string, lines: number) => string,
+  prompt: InteractivePrompt,
+  fingerprint: string,
 ): { text: string; reply_markup: ReturnType<typeof promptKeyboard> } {
-  const prompt = blockedPrompt(pane, paneReader);
   const body = prompt.text ? `\n\n${prompt.text}` : "";
+  const heading = previous === "blocked"
+    ? `${pane.label} has a new input request.`
+    : `${pane.label} needs input (${previous} -> blocked).`;
   return {
-    text: `${pane.label} needs input (${previous} -> blocked).${body}`,
-    reply_markup: promptKeyboard(prompt.options),
+    text: `${heading}${body}`,
+    reply_markup: promptKeyboard(prompt.options, fingerprint.slice(0, 12)),
   };
 }
 
@@ -136,7 +188,7 @@ export async function syncTabs(
   tg: TelegramClient,
   state: DaemonState,
   deps?: WatcherDeps
-): Promise<{ changed: boolean; added: string[]; removed: string[]; renamed: string[]; statusChanged: string[]; statusInitialized: number }> {
+): Promise<{ changed: boolean; added: string[]; removed: string[]; renamed: string[]; statusChanged: string[]; promptsSent: string[]; statusInitialized: number }> {
   const panes = deps?.getAgents?.() ?? getAgents();
   const knownTabs = state.known_tabs ?? {};
 
@@ -147,6 +199,7 @@ export async function syncTabs(
   const removed: string[] = [];
   const renamed: string[] = [];
   const statusChanged: string[] = [];
+  const promptsSent: string[] = [];
   let statusInitialized = 0;
 
   // Step 1: Detect removed tabs
@@ -156,6 +209,7 @@ export async function syncTabs(
       try {
         await tg.deleteForumTopic(chatId, entry.thread_id);
         delete state.thread_mappings[entry.thread_id];
+        delete state.known_topics?.[entry.thread_id];
         deps?.map.delete(entry.thread_id);
         delete knownTabs[tabId];
         removed.push(`${entry.label} (tab ${tabId})`);
@@ -178,6 +232,8 @@ export async function syncTabs(
       try {
         const threadId = await tg.createForumTopic(chatId, topicName);
         knownTabs[pane.tab_id] = { label: topicName, thread_id: threadId, status: pane.status };
+        state.known_topics ??= {};
+        state.known_topics[threadId] = { name: topicName, created_at: new Date().toISOString() };
         const mapping = {
           pane_id: pane.pane_id,
           label: pane.label,
@@ -219,6 +275,7 @@ export async function syncTabs(
       try {
         await tg.editForumTopic(chatId, existing.thread_id, topicName);
         existing.label = topicName;
+        if (state.known_topics?.[existing.thread_id]) state.known_topics[existing.thread_id].name = topicName;
         const mapping = state.thread_mappings[existing.thread_id];
         if (mapping) {
           mapping.label = pane.label;
@@ -291,24 +348,46 @@ export async function syncTabs(
     const existing = knownTabs[pane.tab_id];
     if (!existing) continue;
     const previous = existing.status;
+    let statusTransition = false;
     if (previous === undefined) {
       existing.status = pane.status;
       statusInitialized++;
-      continue;
-    }
-    if (previous !== pane.status) {
+    } else if (previous !== pane.status) {
       existing.status = pane.status;
+      statusTransition = true;
       statusChanged.push(`${pane.label}: ${previous} -> ${pane.status}`);
-      try {
-        if (pane.status === "blocked") {
-          const message = blockedMessage(pane, previous, deps?.readPane);
-          await tg.sendMessage(
+    }
+
+    try {
+      if (pane.status === "blocked") {
+        if (statusTransition && previous !== "blocked") {
+          delete existing.last_blocked_prompt_fingerprint;
+        }
+        const prompt = blockedPrompt(pane, deps?.readPane);
+        const fingerprint = promptFingerprint(prompt);
+        if (fingerprint && fingerprint !== existing.last_blocked_prompt_fingerprint) {
+          if (existing.last_blocked_prompt_message_id && "clearMessageKeyboard" in tg) {
+            try {
+              await tg.clearMessageKeyboard(chatId, existing.last_blocked_prompt_message_id);
+            } catch {
+              // Callback fingerprint validation still rejects an old keyboard.
+            }
+          }
+          const message = blockedMessage(pane, previous ?? "unknown", prompt, fingerprint);
+          const messageId = await tg.sendMessage(
             chatId,
             existing.thread_id,
             message.text,
             { reply_markup: message.reply_markup }
           );
-        } else {
+          existing.last_blocked_prompt_fingerprint = fingerprint;
+          existing.last_blocked_prompt_message_id = messageId;
+          promptsSent.push(pane.label);
+        }
+      } else {
+        delete existing.last_blocked_prompt_fingerprint;
+        delete existing.last_blocked_prompt_message_id;
+        if (statusTransition) {
           await tg.sendMessage(
             chatId,
             existing.thread_id,
@@ -316,24 +395,24 @@ export async function syncTabs(
             { disable_notification: true }
           );
         }
-      } catch (err: any) {
-        log.warn("watcher: failed to send status update", {
-          pane: pane.label,
-          status: pane.status,
-          error: err.message,
-        });
       }
+    } catch (err: any) {
+      log.warn("watcher: failed to send status update", {
+        pane: pane.label,
+        status: pane.status,
+        error: err.message,
+      });
     }
   }
 
   state.known_tabs = knownTabs;
-  const changed = added.length + removed.length + renamed.length + statusChanged.length + statusInitialized > 0;
+  const changed = added.length + removed.length + renamed.length + statusChanged.length + promptsSent.length + statusInitialized > 0;
 
   if (changed) {
-    log.info("watcher: tab sync", { added, removed, renamed, statusChanged, statusInitialized });
+    log.info("watcher: tab sync", { added, removed, renamed, statusChanged, promptsSent, statusInitialized });
   }
 
-  return { changed, added, removed, renamed, statusChanged, statusInitialized };
+  return { changed, added, removed, renamed, statusChanged, promptsSent, statusInitialized };
 }
 
 /**
@@ -389,6 +468,8 @@ export async function healthCheckTopics(
         try {
           const newThreadId = await tg.createForumTopic(chatId, label);
           knownTabs[tabId] = { label, thread_id: newThreadId };
+          state.known_topics ??= {};
+          state.known_topics[newThreadId] = { name: label, created_at: new Date().toISOString() };
           if (pane) {
             const newMapping = {
               pane_id: pane.pane_id,
@@ -400,6 +481,7 @@ export async function healthCheckTopics(
             deps?.map.set(newThreadId, newMapping);
           }
           delete state.thread_mappings[entry.thread_id];
+          delete state.known_topics?.[entry.thread_id];
           deps?.map.delete(entry.thread_id);
           recreated.push(`${label} (tab ${tabId})`);
         } catch (err2: any) {
@@ -437,11 +519,21 @@ export function startWatcher(
   deps?: WatcherDeps
 ): void {
   let tickCount = 0;
+  let tickRunning = false;
+  let tickRequested = false;
+  let stopped = false;
   const thinkingTracker = deps?.thinkingTracker ?? new ThinkingRelayTracker();
   const watcherDeps = deps ? { ...deps, thinkingTracker } : undefined;
   const HEALTH_CHECK_EVERY = 2; // every 2 ticks (2 * 30s = 1min)
   const tick = async () => {
+    if (tickRunning) {
+      tickRequested = true;
+      return;
+    }
+    tickRunning = true;
     try {
+      do {
+      tickRequested = false;
       tickCount++;
       const result = await syncTabs(chatId, tg, state, watcherDeps);
       if (result.changed) saveState();
@@ -460,13 +552,17 @@ export function startWatcher(
         removed: result.removed.length,
         renamed: result.renamed.length,
         statusChanged: result.statusChanged.length,
+        promptsSent: result.promptsSent.length,
         statusInitialized: result.statusInitialized,
         recreated: recreated.length,
         healthCheckRan,
         knownTabs: Object.keys(state.known_tabs ?? {}).length,
       });
+      } while (tickRequested && !stopped);
     } catch (err: any) {
       log.error("watcher: sync error", { error: err.message });
+    } finally {
+      tickRunning = false;
     }
   };
 
@@ -475,7 +571,10 @@ export function startWatcher(
 
   const handle = setInterval(tick, intervalMs);
   if (abortSignal) {
-    abortSignal.addEventListener("abort", () => clearInterval(handle));
+    abortSignal.addEventListener("abort", () => {
+      stopped = true;
+      clearInterval(handle);
+    });
   }
   log.info("watcher: started", { intervalMs });
 }

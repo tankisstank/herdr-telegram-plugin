@@ -5,6 +5,8 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
+import { dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const stateDir = join(
   process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
@@ -25,10 +27,14 @@ function isRunning(): boolean {
 }
 
 if (!isRunning()) {
+  const moduleDir = dirname(fileURLToPath(import.meta.url));
+  const daemonEntry = process.env.HERDR_PLUGIN_ROOT
+    ? join(process.env.HERDR_PLUGIN_ROOT, "dist", "index.js")
+    : join(moduleDir, "index.js");
   // Spawn daemon
   spawn(
     process.execPath,
-    [join(process.env.HERDR_PLUGIN_ROOT ?? __dirname, "dist", "index.js"), "--daemon"],
+    [daemonEntry, "--daemon"],
     { detached: true, stdio: "ignore" }
   ).unref();
 }

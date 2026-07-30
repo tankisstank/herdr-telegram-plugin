@@ -70,25 +70,6 @@ export async function startDaemon(
     opts.customFetch,
   );
 
-  // Re-validate existing pairing
-  if (isPaired(state) && state.authorized_chat_id) {
-    const errors = await tg.validatePermissions(state.authorized_chat_id);
-    if (errors.length > 0) {
-      log.warn("Permission validation failed on startup", { errors });
-      // A transient Telegram outage must not make a healthy daemon impossible
-      // to start. Polling has its own retry loop; this notification is best effort.
-      try {
-        await tg.sendMessage(
-          state.authorized_chat_id, 1, // send to General topic (thread 1)
-          "⚠️ Permission check failed:\n" + errors.map(e => "- " + e).join("\n") +
-          "\n\nBridge in read-only mode. Fix permissions and restart."
-        );
-      } catch (err) {
-        log.warn("Could not send permission warning", { message: err instanceof Error ? err.message : String(err) });
-      }
-    }
-  }
-
   const startupPanes = isPaired(state) ? getAgents() : [];
   const previousMappings = new Map<number, DaemonState["thread_mappings"][keyof DaemonState["thread_mappings"]]>(
     Object.entries(state.thread_mappings).map(([threadId, mapping]) => [Number(threadId), mapping])
@@ -115,7 +96,13 @@ export async function startDaemon(
 
   const turns = new TurnDispatcher();
   const follows = new FollowManager();
-  const pendingApprovalComments = new Map<number, { paneId: string; label: string }>();
+  const pendingApprovalComments = new Map<number, {
+    paneId: string;
+    label: string;
+    promptFingerprint: string;
+    expiresAt: number;
+  }>();
+  const APPROVAL_COMMENT_TIMEOUT_MS = 5 * 60_000;
 
   function approvalResponseForKey(key: string): { kind: "text" | "key"; value: string } {
     const normalized = key.trim().toLowerCase();
@@ -234,8 +221,7 @@ export async function startDaemon(
   // restart. Persist a small update-id window so a replay never re-prompts an
   // agent (and never creates a duplicate Telegram reply).
   tg.bot.use(async (ctx, next) => {
-    const latest = loadState(statePath);
-    if (rememberUpdateId(latest, ctx.update.update_id)) {
+    if ((state.processed_update_ids ?? []).includes(ctx.update.update_id)) {
       log.warn("Ignoring replayed Telegram update", { updateId: ctx.update.update_id });
       return;
     }
@@ -245,8 +231,28 @@ export async function startDaemon(
       threadId: ctx.message?.message_thread_id,
       text: ctx.message?.text?.slice(0, 80),
     });
-    state.processed_update_ids = latest.processed_update_ids;
-    saveState(statePath, latest);
+    await next();
+    if (!rememberUpdateId(state, ctx.update.update_id)) saveStateCallback();
+  });
+
+  // All control surfaces must be constrained to the paired chat. Commands,
+  // callback buttons, and plain text otherwise have different security
+  // properties and a thread id can collide across Telegram chats.
+  tg.bot.use(async (ctx, next) => {
+    const chatId = ctx.chat?.id;
+    if (chatId === undefined) return next();
+    if (!isPaired(state)) {
+      if (ctx.message?.text?.match(/^\/pair(?:@\w+)?(?:\s|$)/)) return next();
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "Bot is not paired." });
+      return;
+    }
+    if (chatId !== state.authorized_chat_id) {
+      log.warn("Ignoring Telegram update from an unauthorized chat", {
+        updateId: ctx.update.update_id,
+      });
+      if (ctx.callbackQuery) await ctx.answerCallbackQuery({ text: "This chat is not authorized." });
+      return;
+    }
     await next();
   });
 
@@ -257,6 +263,11 @@ export async function startDaemon(
     if (!pending) return next();
     const text = ctx.message.text;
     if (!text || text.startsWith("/")) return next();
+    if (Date.now() > pending.expiresAt) {
+      pendingApprovalComments.delete(threadId);
+      await ctx.reply("The approval comment expired. Use the latest approval prompt.");
+      return;
+    }
     pendingApprovalComments.delete(threadId);
     try {
       sendText(pending.paneId, text);
@@ -580,6 +591,11 @@ export async function startDaemon(
     // gives no feedback until the current turn finalises. /stop aborts
     // the in-progress turn and releases the queue immediately.
     if (turns.isBusy(mapping.pane_id)) {
+      const pane = getAgents().find((candidate) => candidate.pane_id === mapping.pane_id);
+      if (pane?.status === "blocked") {
+        await ctx.reply("This agent is waiting for input. Use the latest approval controls in this topic.");
+        return;
+      }
       try {
         await ctx.api.setMessageReaction(ctx.chat!.id, ctx.message!.message_id, [{ type: "emoji", emoji: "👀" }]);
       } catch {
@@ -627,7 +643,12 @@ export async function startDaemon(
     // Follow Nm). They do not need a pane selection — the threadId in the
     // callback carries the binding context.
     if (data.startsWith("resp|") || data.startsWith("respc|")) {
-      const [kind, key] = data.split("|");
+      const [kind, promptId, key, extra] = data.split("|");
+      if (!promptId || !key || extra) {
+        await ctx.answerCallbackQuery({ text: "This approval expired. Use the latest prompt." });
+        try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch {}
+        return;
+      }
       const threadId = ctx.callbackQuery.message?.message_thread_id;
       if (!threadId) {
         await ctx.answerCallbackQuery({ text: "Use inside an agent topic." });
@@ -638,17 +659,29 @@ export async function startDaemon(
         await ctx.answerCallbackQuery({ text: "Thread not bound." });
         return;
       }
+      const tab = Object.values(state.known_tabs ?? {}).find((entry) => entry.thread_id === threadId);
+      const activeFingerprint = tab?.last_blocked_prompt_fingerprint;
+      if (!activeFingerprint || !activeFingerprint.startsWith(promptId)) {
+        await ctx.answerCallbackQuery({ text: "This approval expired. Use the latest prompt." });
+        try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch {}
+        return;
+      }
       try {
         if (kind === "respc") {
           sendApprovalResponse(mapping.pane_id, key || "esc");
-          pendingApprovalComments.set(threadId, { paneId: mapping.pane_id, label: mapping.label });
+          pendingApprovalComments.set(threadId, {
+            paneId: mapping.pane_id,
+            label: mapping.label,
+            promptFingerprint: activeFingerprint,
+            expiresAt: Date.now() + APPROVAL_COMMENT_TIMEOUT_MS,
+          });
           await ctx.answerCallbackQuery({ text: "Waiting for comment." });
           try {
             await ctx.editMessageReplyMarkup({ reply_markup: undefined });
           } catch {
             // Best effort; Telegram may reject edits on old messages.
           }
-          await ctx.api.sendMessage(ctx.chat!.id, `Type your comment for ${mapping.label}. It will be sent to the agent.`, { message_thread_id: threadId });
+          await tg.sendMessage(ctx.chat!.id, threadId, `Type your comment for ${mapping.label}. It will be sent to the agent.`);
           return;
         }
         const sent = sendApprovalResponse(mapping.pane_id, key || "yes");
@@ -658,7 +691,7 @@ export async function startDaemon(
         } catch {
           // Best effort; Telegram may reject edits on old messages.
         }
-        await ctx.api.sendMessage(ctx.chat!.id, `Sent: ${sent}`, { message_thread_id: threadId });
+        await tg.sendMessage(ctx.chat!.id, threadId, `Sent: ${sent}`);
       } catch (err) {
         log.error("Approval callback failed", {
           key,

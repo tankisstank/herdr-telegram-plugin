@@ -41,6 +41,7 @@ function makeDeps(sequence: string[], clock: ReturnType<typeof fakeClock>) {
         return new Promise<void>((resolve) => pending.push(resolve));
       },
       now: clock.now,
+      getAgentStatus: () => "unknown",
     } satisfies ObserveLoopDeps,
     step() {
       // Resolve one outstanding sleep and advance the clock by tickMs.
@@ -100,6 +101,50 @@ function makeBaseOpts(
 }
 
 describe("runObserveLoop — idle stop condition", () => {
+  it("stops quietly when the agent reaches a blocked approval state", async () => {
+    const clock = fakeClock();
+    const f = makeDeps(["approval\n", "approval\n"], clock);
+    const loop = runObserveLoop({
+      ...makeBaseOpts(clock, f.sent, { kind: "idle", stabilityMs: 0 }, {
+        workingTick: () => "working",
+        paneDelta: (delta) => delta,
+        finalMessage: () => "final",
+      }),
+      deps: { ...f.deps, getAgentStatus: () => "blocked" },
+    });
+    await f.drive();
+    await loop;
+
+    expect(f.sent).toEqual([]);
+  });
+
+  it("ends a normal turn with an explicit timeout at its hard deadline", async () => {
+    const clock = fakeClock();
+    const f = makeDeps(["still working\n", "still working\n", "still working\n"], clock);
+    const loop = runObserveLoop({
+      ...makeBaseOpts(clock, f.sent, { kind: "idle", stabilityMs: 10_000 }, {
+        workingTick: () => "working",
+        paneDelta: (delta) => delta,
+        finalMessage: () => "final",
+        timeoutMessage: () => "timed out",
+      }),
+      cfg: {
+        ...makeBaseOpts(clock, f.sent, { kind: "idle", stabilityMs: 10_000 }, {
+          workingTick: () => "working",
+          paneDelta: (delta) => delta,
+          finalMessage: () => "final",
+        }).cfg,
+        maxTotalWaitS: 0.2,
+      },
+      deps: { ...f.deps, getAgentStatus: () => "working" },
+    });
+    await f.drive();
+    await loop;
+
+    expect(f.sent.some((message) => message.text === "timed out")).toBe(true);
+    expect(f.sent.some((message) => message.text === "final")).toBe(false);
+  });
+
   it("emits working tick on every iteration and finishes when pane stabilises for stabilityMs", async () => {
     const clock = fakeClock();
     // Sequence: pane grows twice, then settles.

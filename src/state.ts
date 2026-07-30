@@ -37,5 +37,8 @@ export function rememberUpdateId(state: DaemonState, updateId: number, maxEntrie
 export function saveState(stateDir: string | undefined, state: DaemonState): void {
   const dir = stateDir ?? path.join(os.homedir(), ".local", "state", "herdr-telegram");
   fs.mkdirSync(dir, { recursive: true });
-  fs.writeFileSync(path.join(dir, "state.json"), JSON.stringify(state, null, 2), "utf8");
+  const filePath = path.join(dir, "state.json");
+  const tempPath = path.join(dir, `state.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(tempPath, JSON.stringify(state, null, 2), "utf8");
+  fs.renameSync(tempPath, filePath);
 }

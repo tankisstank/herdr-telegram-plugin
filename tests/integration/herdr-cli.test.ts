@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { getAgents, resetHerdrBinCache } from "../../src/herdr-client.js";
@@ -11,16 +11,16 @@ describe("Herdr CLI integration", () => {
   beforeEach(() => {
     dir = mkdtempSync(join(tmpdir(), "herdr-cli-integration-"));
     originalBin = process.env.HERDR_BIN_PATH;
-    const bin = join(dir, "herdr");
-    writeFileSync(bin, `#!/bin/sh
-if [ "$1 $2" = "tab list" ]; then
-  echo 'tab unavailable' >&2
-  exit 7
-fi
-echo 'agent unavailable' >&2
-exit 9
+    const bin = join(dir, "herdr-mock.js");
+    writeFileSync(bin, `
+const args = process.argv.slice(2);
+if (args[0] === "tab" && args[1] === "list") {
+  console.error("tab unavailable");
+  process.exit(7);
+}
+console.error("agent unavailable");
+process.exit(9);
 `);
-    chmodSync(bin, 0o755);
     process.env.HERDR_BIN_PATH = bin;
     resetHerdrBinCache();
   });
