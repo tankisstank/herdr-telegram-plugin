@@ -95,6 +95,35 @@ describe("classifyTabChanges", () => {
   });
 });
 describe("syncTabs message ordering", () => {
+  it("keeps a topic mapping when Herdr temporarily omits its tab", async () => {
+    const pane = makePane({ tab_id: "w1:tA", pane_id: "w1:pA", label: "Test" });
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {
+        10: { pane_id: pane.pane_id, label: pane.label, agent: pane.agent, created_at: "now" },
+      },
+      known_topics: { 10: { name: "W1-Test", created_at: "now" } },
+      known_tabs: { [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "idle" } },
+    };
+    const map = new Map([[10, state.thread_mappings[10]]]);
+    const telegram = {
+      deleteForumTopic: async () => { throw new Error("must not delete"); },
+      sendMessage: async () => 1,
+    };
+
+    const result = await syncTabs(1, telegram as any, state, {
+      map,
+      getAgents: () => [],
+      readPane: () => "",
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(state.known_tabs[pane.tab_id].thread_id).toBe(10);
+    expect(state.thread_mappings[10].pane_id).toBe(pane.pane_id);
+    expect(map.get(10)?.pane_id).toBe(pane.pane_id);
+  });
+
   it("sends fresh thinking before the blocked approval prompt", async () => {
     let pane = makePane({
       tab_id: "w1:tA",

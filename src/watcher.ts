@@ -178,7 +178,7 @@ function blockedMessage(
 /**
  * Watch for herdr tab changes and sync topics in Telegram.
  * - New agent pane (tab_id not in known_tabs) → create topic
- * - Closed agent pane (tab_id in known_tabs but not in current list) → delete topic
+ * - Missing agent pane (tab_id in known_tabs but not in current list) → retain topic/mapping
  * - Renamed tab (label changed) → edit topic name
  *
  * Returns the updated known_tabs and a log of changes for the caller to persist.
@@ -202,24 +202,19 @@ export async function syncTabs(
   const promptsSent: string[] = [];
   let statusInitialized = 0;
 
-  // Step 1: Detect removed tabs
+  // Step 1: Retain topics for tabs that are temporarily absent. Herdr can
+  // return a partial pane list while a workspace changes focus or restarts.
+  // Deleting on one missing sample loses the user's topic and makes messages
+  // sent to the old topic silently unbound. Retained topics act as history for
+  // permanently closed tabs and are re-used if the same tab returns.
   for (const tabId of knownTabIds) {
     if (!currentTabIds.has(tabId)) {
       const entry = knownTabs[tabId];
-      try {
-        await tg.deleteForumTopic(chatId, entry.thread_id);
-        delete state.thread_mappings[entry.thread_id];
-        delete state.known_topics?.[entry.thread_id];
-        deps?.map.delete(entry.thread_id);
-        delete knownTabs[tabId];
-        removed.push(`${entry.label} (tab ${tabId})`);
-      } catch (err: any) {
-        log.warn("watcher: failed to delete topic", {
-          tabId,
-          threadId: entry.thread_id,
-          error: err.message,
-        });
-      }
+      log.info("watcher: pane temporarily absent; retaining topic mapping", {
+        tabId,
+        threadId: entry.thread_id,
+        label: entry.label,
+      });
     }
   }
 

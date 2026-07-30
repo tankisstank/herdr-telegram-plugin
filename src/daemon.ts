@@ -590,12 +590,13 @@ export async function startDaemon(
     // turn look silently swallowed — the queue serialises per pane but
     // gives no feedback until the current turn finalises. /stop aborts
     // the in-progress turn and releases the queue immediately.
-    if (turns.isBusy(mapping.pane_id)) {
-      const pane = getAgents().find((candidate) => candidate.pane_id === mapping.pane_id);
-      if (pane?.status === "blocked") {
-        await ctx.reply("This agent is waiting for input. Use the latest approval controls in this topic.");
-        return;
-      }
+    const pane = getAgents().find((candidate) => candidate.pane_id === mapping.pane_id);
+    if (pane?.status === "blocked") {
+      await ctx.reply("This agent is waiting for input. Use the latest approval controls in this topic.");
+      return;
+    }
+    const agentAlreadyWorking = pane?.status === "working";
+    if (turns.isBusy(mapping.pane_id) || agentAlreadyWorking) {
       try {
         await ctx.api.setMessageReaction(ctx.chat!.id, ctx.message!.message_id, [{ type: "emoji", emoji: "👀" }]);
       } catch {
@@ -611,7 +612,7 @@ export async function startDaemon(
     // follow timer is reset either way. 👀 confirms to the user that we
     // saw the message and the agent will pick it up.
     if (deps.follows) deps.follows.touch(threadId);
-    if (turns.isBusy(mapping.pane_id)) {
+    if (turns.isBusy(mapping.pane_id) || agentAlreadyWorking) {
       try {
         sendText(mapping.pane_id, text);
         await ctx.api.setMessageReaction(ctx.chat!.id, ctx.message!.message_id, [{ type: "emoji", emoji: "👀" }]);
