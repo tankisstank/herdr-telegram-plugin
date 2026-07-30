@@ -442,10 +442,25 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     // Codex exposes model and reasoning selection through its native /model
     // picker. Keep the catalog in Codex so it matches the signed-in account.
     sendText(mapping.pane_id, "/model");
+    // The TUI is the source of truth for account-specific model availability.
+    // Relay its rendered picker so Telegram users can see names and the
+    // current highlight instead of navigating blind with Up/Down.
+    await new Promise<void>((resolve) => setTimeout(resolve, 350));
+    let pickerView = "";
+    try {
+      pickerView = cleanPaneOutput(stripStatusBar(readPane(mapping.pane_id, 80)));
+    } catch {
+      // Keep the native controls available even if Herdr cannot read a redraw.
+    }
     await ctx.reply(
-      label === "model"
-        ? "Codex model picker is open. Use the controls below, then Choose. Use /last to inspect the current picker."
-        : "Codex model and reasoning picker is open. Navigate to Low, Medium, or High, then Choose. Use /last to inspect the current picker.",
+      [
+        label === "model"
+          ? "Codex model picker is open."
+          : "Codex model and reasoning picker is open. Reasoning choices are Low, Medium, or High.",
+        pickerView
+          ? `\nAvailable choices (› is selected):\n\n${truncateMiddle(pickerView, 3000)}`
+          : "\nThe picker is redrawing. Use /last to inspect the current choices.",
+      ].join(""),
       { reply_markup: nativeModelPickerKeyboard(mapping.pane_id) }
     );
   }
