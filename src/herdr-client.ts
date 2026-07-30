@@ -180,13 +180,13 @@ export function buildSendTextArgs(paneId: string, text: string): string[] {
 }
 
 export function buildSubmitTextArgs(paneId: string): string[] {
-  return ["pane", "send-keys", paneId, "Enter"];
+  return ["pane", "send-keys", paneId, "Ctrl+Enter"];
 }
 
 export function sendText(paneId: string, text: string): void {
   execHerdr(buildSendTextArgs(paneId, text));
-  // `pane run` has not consistently submitted text across Herdr versions.
-  // Use the explicit transport operations so Telegram prompts always start.
+  // The Codex composer is configured to insert a newline on Enter. Use the
+  // explicit transport operations and its submit shortcut for Telegram prompts.
   execHerdr(buildSubmitTextArgs(paneId));
 }
 

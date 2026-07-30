@@ -107,9 +107,9 @@ describe("buildSendTextArgs", () => {
 });
 
 describe("buildSubmitTextArgs", () => {
-  it("builds an explicit Enter keypress after literal text", () => {
+  it("builds Codex's Ctrl+Enter submit shortcut after literal text", () => {
     expect(buildSubmitTextArgs("w1:pZ")).toEqual([
-      "pane", "send-keys", "w1:pZ", "Enter",
+      "pane", "send-keys", "w1:pZ", "Ctrl+Enter",
     ]);
   });
 });

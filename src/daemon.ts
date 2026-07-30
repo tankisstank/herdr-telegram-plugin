@@ -121,9 +121,9 @@ export async function startDaemon(
     const normalized = key.trim().toLowerCase();
     // Approval callbacks must send the actual TUI shortcut. Sending the
     // human-readable option label makes the agent echo that label as input.
-    if (["yes", "y"].includes(normalized)) return { kind: "text", value: "y" };
-    if (["all", "p", "trust"].includes(normalized)) return { kind: "text", value: "p" };
-    if (["no", "n"].includes(normalized)) return { kind: "text", value: "n" };
+    if (["yes", "y"].includes(normalized)) return { kind: "key", value: "y" };
+    if (["all", "p", "trust"].includes(normalized)) return { kind: "key", value: "p" };
+    if (["no", "n"].includes(normalized)) return { kind: "key", value: "n" };
     if (["esc", "escape"].includes(normalized)) return { kind: "key", value: "Escape" };
     return { kind: "text", value: normalized };
   }
@@ -131,10 +131,13 @@ export async function startDaemon(
   function sendApprovalResponse(paneId: string, key: string): string {
     const response = approvalResponseForKey(key);
     if (response.kind === "key") {
-      sendKeys(paneId, response.value);
+      // Approval dialogs use their own key shortcuts and Enter confirmation;
+      // they must not receive Codex composer's Ctrl+Enter submit shortcut.
+      if (response.value === "Escape") sendKeys(paneId, response.value);
+      else sendKeys(paneId, response.value, "Enter");
       return response.value;
     }
-    // sendText sends the printable shortcut followed by an explicit Enter.
+    // Fallback free text is a normal Codex prompt.
     sendText(paneId, response.value);
     return response.value;
   }
