@@ -85,6 +85,100 @@ In the target Telegram Forum supergroup, send `/pair`. The bot creates or reconc
 
 If a topic is not bound, the bot offers buttons to bind it to a current pane. Topics are retained when Herdr temporarily omits a tab, preventing accidental remapping during workspace changes or restarts.
 
+## Architecture
+
+### Control Plane
+
+```mermaid
+flowchart LR
+    U[Telegram user] <--> F[Telegram Forum topic]
+    F <--> D[Bridge daemon\nGrammy]
+    D <--> S[Durable state\npairing and mappings]
+    D <--> H[Herdr CLI]
+    W[Watcher] <--> H
+    W --> D
+    H <--> A[Herdr agent pane]
+```
+
+### Workspace, Tab, And Topic Mapping
+
+```mermaid
+flowchart TB
+    WS[Workspace: Video Review]
+    T1[Tab: Add sfx]
+    P1[Pane: w4:pV]
+    F[Telegram Forum]
+    X1[Topic: VR-Add sfx]
+
+    WS --> T1 --> P1
+    P1 <--> X1
+    X1 --> F
+```
+
+### Prompt And Response Flow
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant T as Telegram topic
+    participant D as Bridge daemon
+    participant H as Herdr CLI
+    participant A as Agent
+
+    U->>T: Send prompt
+    T->>D: Telegram update
+    D->>D: Check paired chat and topic mapping
+    D->>H: Send prompt and CR submit
+    H->>A: Submit prompt
+    loop Agent is working
+        D->>H: Read status and pane output
+        H-->>D: New progress or output
+        D->>T: Progress and status messages
+    end
+    A-->>H: Final output or idle state
+    H-->>D: Final pane snapshot
+    D->>T: Final response
+```
+
+### Approval And Comment Flow
+
+```mermaid
+sequenceDiagram
+    participant A as Agent
+    participant W as Watcher
+    participant T as Telegram topic
+    participant U as User
+    participant D as Bridge daemon
+
+    A-->>W: Blocked prompt with options
+    W->>W: Parse options and fingerprint prompt
+    W->>T: Yes / All / No / No + comment
+    U->>T: Choose an action
+    T->>D: Callback with prompt fingerprint
+    D->>D: Reject stale callbacks
+    alt Direct action
+        D->>A: Send shortcut and Enter
+    else No + comment
+        D->>T: Request comment
+        U->>T: Send comment
+        D->>A: Forward comment
+    end
+    A-->>W: Blocked to working
+    W->>T: Status update
+```
+
+### Model And Reasoning Picker
+
+```mermaid
+flowchart TD
+    U[User sends /model or /reasoning] --> D[Bridge daemon]
+    D --> C[Codex native picker]
+    C --> R[Read rendered picker from pane]
+    R --> T[Telegram displays choices\nand current selection]
+    T --> K[Up / Down / Choose / Cancel]
+    K -->|Herdr send-keys| C
+```
+
 ## Commands
 
 | Command | Purpose |
