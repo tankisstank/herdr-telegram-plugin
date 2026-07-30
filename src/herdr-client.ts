@@ -176,18 +176,14 @@ export function getAgents(): PaneInfo[] {
 }
 
 export function buildSendTextArgs(paneId: string, text: string): string[] {
-  return ["pane", "send-text", paneId, text];
-}
-
-export function buildSubmitTextArgs(paneId: string): string[] {
-  return ["pane", "send-keys", paneId, "Ctrl+Enter"];
+  return ["agent", "prompt", paneId, text];
 }
 
 export function sendText(paneId: string, text: string): void {
+  // Agent prompt is Herdr's supported submission surface. It handles the
+  // live terminal protocol and starts a real agent turn; raw pane input does
+  // not reliably submit text in Codex's multiline composer.
   execHerdr(buildSendTextArgs(paneId, text));
-  // The Codex composer is configured to insert a newline on Enter. Use the
-  // explicit transport operations and its submit shortcut for Telegram prompts.
-  execHerdr(buildSubmitTextArgs(paneId));
 }
 
 // `herdr pane send-keys` accepts named keys (Escape, Enter, Up, Down, etc.)
@@ -196,7 +192,7 @@ export function sendText(paneId: string, text: string): void {
 // by the agent TUI; send-keys routes the named key through the terminal
 // input pipeline and triggers the agent's real ESC handler.
 export function buildSendKeysArgs(paneId: string, key: string, ...moreKeys: string[]): string[] {
-  return ["pane", "send-keys", paneId, key, ...moreKeys];
+  return ["agent", "send-keys", paneId, key, ...moreKeys];
 }
 
 export function sendKeys(paneId: string, key: string, ...moreKeys: string[]): void {

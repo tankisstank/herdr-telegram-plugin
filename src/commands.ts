@@ -380,9 +380,9 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     // Soft-cancels the current operation (tool call, generation) without
     // killing the agent process. For a hard interrupt, use /interrupt.
     //
-    // Uses herdr pane send-keys with the named 'Escape' key. Raw ESC
+    // Uses herdr agent send-keys with the named 'Escape' key. Raw ESC
     // bytes sent as terminal text are interpreted as the start of an ANSI CSI
-    // sequence and silently swallowed; send-keys routes the named key
+    // sequence and silently swallowed; agent send-keys routes the named key
     // through the terminal input pipeline and triggers the real handler.
     //
     // Also aborts the in-flight turn so queued user messages can proceed.

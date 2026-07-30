@@ -5,7 +5,6 @@ import { join } from "node:path";
 import {
   parseAgentList,
   buildSendTextArgs,
-  buildSubmitTextArgs,
   buildSendKeysArgs,
   buildWaitArgs,
   herdrBin,
@@ -99,17 +98,9 @@ describe("parseAgentList", () => {
 });
 
 describe("buildSendTextArgs", () => {
-  it("builds a literal text args tuple without relying on pane run", () => {
+  it("uses Herdr's agent prompt submission surface", () => {
     expect(buildSendTextArgs("w1:pZ", "hello world")).toEqual([
-      "pane", "send-text", "w1:pZ", "hello world",
-    ]);
-  });
-});
-
-describe("buildSubmitTextArgs", () => {
-  it("builds Codex's Ctrl+Enter submit shortcut after literal text", () => {
-    expect(buildSubmitTextArgs("w1:pZ")).toEqual([
-      "pane", "send-keys", "w1:pZ", "Ctrl+Enter",
+      "agent", "prompt", "w1:pZ", "hello world",
     ]);
   });
 });
@@ -117,13 +108,13 @@ describe("buildSubmitTextArgs", () => {
 describe("buildSendKeysArgs", () => {
   it("builds args tuple with a single named key", () => {
     expect(buildSendKeysArgs("w1:pZ", "Escape")).toEqual([
-      "pane", "send-keys", "w1:pZ", "Escape",
+      "agent", "send-keys", "w1:pZ", "Escape",
     ]);
   });
 
   it("appends additional named keys when given", () => {
     expect(buildSendKeysArgs("w1:pZ", "Escape", "Enter")).toEqual([
-      "pane", "send-keys", "w1:pZ", "Escape", "Enter",
+      "agent", "send-keys", "w1:pZ", "Escape", "Enter",
     ]);
   });
 });

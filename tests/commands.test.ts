@@ -60,7 +60,7 @@ function makeFakeBot(): { bot: any; run: (name: string, ctx: any) => Promise<voi
 
 describe("/stop command handler", () => {
   it("sends the named 'Escape' key to the pane bound to the current thread", async () => {
-    // ESC must be routed through herdr pane send-keys with the named key,
+    // ESC must be routed through herdr agent send-keys with the named key,
     // not sent as a raw \x1b byte through the text transport: raw ESC is interpreted as
     // the start of an ANSI CSI sequence and silently swallowed.
     const sendEscapeSpy = vi.spyOn(herdrClient, "sendEscape").mockImplementation(() => {});
