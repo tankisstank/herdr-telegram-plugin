@@ -1,104 +1,147 @@
 # herdr-telegram-plugin
 
-> 📖 Full documentation: https://mvallebr.github.io/herdr-telegram-plugin/
+Telegram Forum control plane for [herdr](https://herdr.dev). Each Herdr agent tab is represented by one Telegram forum topic. The bridge sends prompts, status, selected agent progress, approval controls, and final responses without placing an LLM between Telegram and the agent.
 
-Control your [herdr](https://herdr.dev) agents from Telegram via forum topics — **zero LLM in the path**.
+This repository is a maintained fork of [mvallebr/herdr-telegram-plugin](https://github.com/mvallebr/herdr-telegram-plugin). The fork adds two-way Codex-focused remote control, hardened authorization, and Windows validation.
 
-Each herdr agent pane maps 1:1 to a Telegram forum topic. Messages in a topic are forwarded to the pane as keyboard input. Agent output is sent back to Telegram.
+## What Changed From Upstream
 
-## Quick install
+- Forum topics are named `[workspace abbreviation]-[tab name]`, for example `VR-Add sfx` for workspace `Video Review`.
+- Plain text in a bound topic is submitted to the agent with the Codex carriage-return submit event, not merely inserted as a new composer line.
+- The bridge relays useful agent progress bullets as separate Telegram messages while filtering shell/tool noise.
+- Blocked permission and decision prompts become inline Telegram actions: Yes, All, No, and No + comment when the prompt supports it.
+- Approval callbacks are fingerprinted. A button from an earlier prompt cannot approve a later prompt; stale keyboards are disabled when a new prompt arrives.
+- `/model` and `/reasoning` open the native Codex picker and relay its rendered choices to Telegram, including the highlighted selection.
+- Topic mappings survive temporary missing panes from Herdr. The bridge retains a topic as history instead of repeatedly deleting and recreating it.
+- Commands, callbacks, and messages are restricted to the paired chat. State writes are atomic, outbound topic messages are serialized, and watcher ticks cannot overlap.
+- The plugin supports Windows in CI and can run JavaScript Herdr mock binaries safely in tests.
 
-### Option A: install from GitHub via the herdr CLI (recommended)
+## Requirements
+
+- Herdr `>= 0.7.0`
+- Node.js 20+
+- A Telegram **Forum supergroup** with Topics enabled
+- A bot created through BotFather and made an administrator of that group with **Manage Topics** permission
+
+The bot pairs with exactly one Telegram chat. Do not pair it in a private chat: this bridge uses forum topics as its routing surface.
+
+## Install
+
+Install this fork with Herdr:
 
 ```bash
-herdr plugin install mvallebr/herdr-telegram-plugin --yes
+herdr plugin install tankisstank/herdr-telegram-plugin --yes
 ```
 
-This drops the plugin into `~/.config/herdr/plugins/github/herdr-telegram-plugin-*` and resolves all dependencies.
-
-### Option B: from a git checkout (for development)
+For development:
 
 ```bash
-git clone https://github.com/mvallebr/herdr-telegram-plugin
+git clone https://github.com/tankisstank/herdr-telegram-plugin.git
 cd herdr-telegram-plugin
-npm install && npm run build
+npm ci
+npm run build
+herdr plugin link .
 ```
 
-Then point herdr at it: `herdr plugin link .`
+## Configure
 
-### Configure
+Create `~/.config/herdr-telegram/config.toml` on Linux/macOS, or `%USERPROFILE%\.config\herdr-telegram\config.toml` on Windows:
 
-```bash
-mkdir -p ~/.config/herdr-telegram
-echo '[telegram]' > ~/.config/herdr-telegram/config.toml
-echo 'bot_token = "YOUR_BOT_TOKEN"' >> ~/.config/herdr-telegram/config.toml
-echo 'progress_interval_ms = 15000' >> ~/.config/herdr-telegram/config.toml
+```toml
+[telegram]
+bot_token = "YOUR_BOT_TOKEN"
+progress_interval_ms = 15000
+
+# Optional controls
+# max_total_wait_s = 1800
+# max_progress_updates = 60
+# stability_window_ms = 30000
+# follow_timeout_minutes = 30
 ```
 
-### Start the daemon
+Alternatively, provide the token with `HERDR_TG_BOT_TOKEN`. Do not commit the token or send it in chat logs.
 
-From the herdr-managed install (`~/.config/herdr/plugins/github/herdr-telegram-plugin-*`):
+## Start And Pair
+
+Run the plugin bootstrap action, or start the daemon from the managed installation:
 
 ```bash
-cd ~/.config/herdr/plugins/github/herdr-telegram-plugin-*
 node dist/index.js --daemon
+node dist/index.js --status
 ```
 
-Or, equivalently, the daemon auto-launches when needed by Telegram activity
-(grammy long-polling only happens while the daemon runs, so a one-shot
-`node dist/index.js --daemon &` per session is the simplest pattern).
+The daemon must be running to receive Telegram updates. Its state and PID are stored under `~/.local/state/herdr-telegram` (the same location is used on Windows under the user profile). Start it again after a reboot, or register the bootstrap action with your process supervisor or logon task.
 
-Then open Telegram, find your bot's private chat, and send `/pair`.
+Long-polling retries temporary Telegram failures, including a `409 Conflict` after a supervised restart. Use `node dist/index.js --status` to confirm that polling is running.
 
-The daemon keeps a single long-poll connection. Temporary Telegram failures,
-including a `409 Conflict` after a supervised restart, are retried with
-backoff; invalid bot credentials fail fast. Use `node dist/index.js --status`
-to inspect the process and polling state.
+In the target Telegram Forum supergroup, send `/pair`. The bot creates or reconciles one topic per current agent tab. From then on, only that paired chat can use the bot.
 
-### Operational smoke check
+## Topic Workflow
 
-Run this only on a machine with Herdr and a real bot configuration:
+1. Open the topic matching the desired Herdr tab, such as `VR-Add sfx`.
+2. Send a plain text prompt. When the agent is idle, the bridge starts and observes a turn. When it is already working, the text is forwarded to the agent's queue.
+3. Follow separate progress messages and status transitions in the same topic.
+4. If the agent asks for an approval or decision, use the inline action buttons. Choose **No + comment** to send a free-text instruction with the rejection.
+
+If a topic is not bound, the bot offers buttons to bind it to a current pane. Topics are retained when Herdr temporarily omits a tab, preventing accidental remapping during workspace changes or restarts.
+
+## Commands
+
+| Command | Purpose |
+| --- | --- |
+| Plain text | Submit a prompt to the topic's agent pane. |
+| `/pair` | Pair the current Forum supergroup. |
+| `/unpair` | Remove pairing and delete bot-managed topics. |
+| `/agents` | List detected agents and their status. |
+| `/read [agent]` | Read output and offer a reply target. |
+| `/reply [agent]` | Read an agent then send a reply. |
+| `/send [agent] <text>` | Send text to a selected agent. |
+| `/last` | Show the latest pane output without submitting a turn. |
+| `/model` | Open the native Codex model picker and relay its choices. |
+| `/reasoning` | Open the native picker and select Low, Medium, or High reasoning. |
+| `/stop` | Send Escape to softly cancel the current operation. |
+| `/interrupt` | Send Ctrl+C for a hard interrupt. |
+| `/trust` | Send `trust, always allow` to the agent. |
+| `/digest` | Ask the agent for a work summary. |
+| `/follow [minutes]` | Continue relaying output after a turn; `0` means manual stop. |
+| `/unfollow` | Stop the active follow subscription. |
+| `/bind <label>` | Bind the current topic to a Herdr pane. |
+| `/unbind` | Remove the current topic binding. |
+| `/topics` | List bound topic IDs. |
+| `/delete <id>` | Delete a bot-managed forum topic. |
+| `/cleanup` | Remove duplicate topics. |
+| `/reconcile` | Re-sync current Herdr tabs and Telegram topics. |
+| `/status` | Show bridge uptime and follow status. |
+
+## Model And Reasoning Selection
+
+Run `/model` or `/reasoning` inside an **idle** Codex topic. Telegram shows the picker text from the agent TUI, so model names and the current `›` selection are visible remotely. Use **Up**, **Down**, **Choose**, or **Cancel** to operate the native picker. The available models remain account-specific because Codex itself supplies the picker.
+
+## Reliability And Security
+
+- All control messages are authorized against the paired chat before command or callback handling.
+- Approval choices are bound to the exact prompt that created them.
+- A blocked agent never receives ordinary topic text; use its current approval controls instead.
+- Telegram output for a topic is serialized to preserve progress, approval, and final-message order.
+- State files are written through a temporary file then renamed to avoid corruption on interruption.
+- A normal observed turn stops on blocked state and has a configured hard timeout; it does not publish a false final response while an approval is waiting.
+
+## Development
+
+```bash
+npm ci
+npm test
+npm run docs:build
+```
+
+The test suite includes watcher, approval, command, observe-loop, and mocked end-to-end turn-flow coverage. GitHub Actions runs tests on Ubuntu and Windows.
+
+For a machine with a real Herdr installation and bot configuration, run the non-mutating operational preflight:
 
 ```bash
 npm run smoke
 ```
 
-It validates `herdr agent list` and the bot credentials without consuming
-updates or sending messages. Then start the daemon and verify one manual
-topic → pane → reply round trip in Telegram.
-
-## Commands
-
-| Command | What it does |
-|---|---|
-| Plain text in any topic | Sends text to that topic's agent pane |
-| `/digest` | Ask the agent for a summary of current work |
-| `/pair` | Authorize the bot in the current chat |
-| `/unpair` | De-authorize and delete all topics |
-| `/bind <label>` | Bind the current topic to a herdr pane |
-| `/cleanup` | Remove duplicate topics |
-| `/reconcile` | Re-sync herdr tabs with Telegram topics |
-| `/last` | Read-only snapshot of the current pane output (no turn submitted) |
-| `/follow [minutes]` | Subscribe to pane updates for N minutes (default 30, 0 = manual); resets on each message |
-| `/unfollow` | Stop the active subscription on this thread |
-| `/stop` | Send ESC to the agent (soft-cancels the current operation; for hard interrupt use `/interrupt`) |
-
-## How it works
-
-The daemon connects to Telegram via grammy and to herdr via CLI (`spawnSync`). A watcher syncs herdr tabs to forum topics every 15s. A shared turn coordinator sends the prompt once, polls an agent wrapper at the configured interval, and publishes neutral progress until a safe final result arrives. Codex/Pi/OMP use session logs; other agents use anchor-based screen scraping.
-
-## Agent support
-
-| Agent | Output adapter |
-|---|---|
-| Codex | Correlated JSONL `final_answer` |
-| Pi / OMP | Herdr-provided JSONL session path |
-| OpenCode and other agents | Screen scraping with prompt anchor, snapshot delta, and stable-screen fallback |
-
-See the [full support matrix](docs/guide/agent-support.md). To contribute a wrapper or report a bug, read [CONTRIBUTING.md](CONTRIBUTING.md).
-
-[→ Full documentation](https://mvallebr.github.io/herdr-telegram-plugin/)
-
 ## License
 
-MIT
+MIT. Original project: <https://github.com/mvallebr/herdr-telegram-plugin>.
