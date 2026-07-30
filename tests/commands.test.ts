@@ -166,3 +166,54 @@ describe("/stop command handler", () => {
     sendEscapeSpy.mockRestore();
   });
 });
+
+describe("/model and /reasoning command handlers", () => {
+  function modelCommandDeps(turns?: CommandDeps["turns"]): CommandDeps {
+    const map = new Map<number, ThreadMapping>();
+    map.set(140, { pane_id: "w1:p27", label: "dmarc", agent: "codex", created_at: "x" });
+    return {
+      map,
+      stateDir: "/tmp/no-such",
+      chatId: -100,
+      startTime: Date.now(),
+      saveMappings: () => {},
+      turns,
+    };
+  }
+
+  it("opens Codex's native model picker for the topic pane", async () => {
+    const sendTextSpy = vi.spyOn(herdrClient, "sendText").mockImplementation(() => {});
+    const fake = makeFakeBot();
+    registerCommands(fake.bot, modelCommandDeps());
+
+    await fake.run("model", { message: { message_thread_id: 140 } });
+
+    expect(sendTextSpy).toHaveBeenCalledWith("w1:p27", "/model");
+    expect(fake.replies.join("\n")).toContain("model picker");
+    sendTextSpy.mockRestore();
+  });
+
+  it("opens the same native picker for reasoning selection", async () => {
+    const sendTextSpy = vi.spyOn(herdrClient, "sendText").mockImplementation(() => {});
+    const fake = makeFakeBot();
+    registerCommands(fake.bot, modelCommandDeps());
+
+    await fake.run("reasoning", { message: { message_thread_id: 140 } });
+
+    expect(sendTextSpy).toHaveBeenCalledWith("w1:p27", "/model");
+    expect(fake.replies.join("\n")).toContain("Low, Medium, or High");
+    sendTextSpy.mockRestore();
+  });
+
+  it("does not disturb an active agent turn", async () => {
+    const sendTextSpy = vi.spyOn(herdrClient, "sendText").mockImplementation(() => {});
+    const fake = makeFakeBot();
+    registerCommands(fake.bot, modelCommandDeps({ isBusy: () => true, abort: () => false }));
+
+    await fake.run("reasoning", { message: { message_thread_id: 140 } });
+
+    expect(sendTextSpy).not.toHaveBeenCalled();
+    expect(fake.replies.join("\n")).toContain("become idle");
+    sendTextSpy.mockRestore();
+  });
+});

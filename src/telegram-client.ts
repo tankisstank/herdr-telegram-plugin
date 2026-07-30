@@ -141,6 +141,8 @@ export class TelegramClient {
       { command: "stop", description: "Soft stop this topic's agent" },
       { command: "interrupt", description: "Hard interrupt an agent" },
       { command: "trust", description: "Trust tools for an agent" },
+      { command: "model", description: "Choose this agent's Codex model" },
+      { command: "reasoning", description: "Choose Low, Medium, or High reasoning" },
       { command: "bind", description: "Bind this topic to a pane" },
       { command: "topics", description: "List bound topic ids" },
       { command: "reconcile", description: "Sync Herdr panes to topics" },

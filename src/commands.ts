@@ -1,6 +1,6 @@
 import { Bot, type Context, InlineKeyboard } from "grammy";
 import type { PaneInfo, ThreadMapping } from "./types.js";
-import { getAgents, readPane, sendText, sendEscape, sendInterrupt } from "./herdr-client.js";
+import { getAgents, readPane, sendText, sendEscape, sendInterrupt, sendKeys } from "./herdr-client.js";
 import { findMapping } from "./mapping.js";
 import { isPaired } from "./pairing.js";
 import type { DaemonState } from "./types.js";
@@ -125,6 +125,15 @@ function agentPicker(action: "read" | "send" | "reply" | "trust" | "interrupt", 
   return keyboard;
 }
 
+function nativeModelPickerKeyboard(paneId: string): InlineKeyboard {
+  return new InlineKeyboard()
+    .text("Up", `tui|up|${paneId}`)
+    .text("Down", `tui|down|${paneId}`)
+    .row()
+    .text("Choose", `tui|enter|${paneId}`)
+    .text("Cancel", `tui|escape|${paneId}`);
+}
+
 function truncateMiddle(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
   return `(... ${text.length - maxChars} chars omitted)\n${text.slice(-maxChars)}`;
@@ -212,9 +221,20 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
   if (typeof (bot as any).on === "function") {
     bot.on("callback_query:data", async (ctx, next) => {
     const data = ctx.callbackQuery.data;
-    if (!data.startsWith("agent|")) return next();
+    if (data.startsWith("agent|")) {
+      const [, action, paneId] = data.split("|");
+      await handleAgentPicker(ctx, action, paneId);
+      return;
+    }
+    if (!data.startsWith("tui|")) return next();
     const [, action, paneId] = data.split("|");
-    await handleAgentPicker(ctx, action, paneId);
+    const key = { up: "Up", down: "Down", enter: "Enter", escape: "Escape" }[action];
+    if (!key || !mappingForPane(deps.map, paneId)) {
+      await ctx.answerCallbackQuery({ text: "Model picker is no longer available." });
+      return;
+    }
+    sendKeys(paneId, key);
+    await ctx.answerCallbackQuery();
   });
 
   bot.on("message:text", async (ctx, next) => {
@@ -247,6 +267,8 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
         "/interrupt — send Ctrl+C to this thread's agent (hard interrupt)",
         "/stop — send ESC to this thread's agent (soft cancel of current operation)",
         "/trust — send 'trust, always allow' to this thread's agent",
+        "/model — open Codex's model picker for this idle agent",
+        "/reasoning — open Codex's reasoning picker for this idle agent",
         "/digest — today's activity (coming soon)",
         "/last — show current pane output (read-only, no turn)",
         "/follow [minutes] — keep listening after the agent responds; expires N min after your last message (default 30, 0 = manual)",
@@ -399,6 +421,41 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     if (!mapping) { await ctx.reply("No pane for this topic."); return; }
     sendText(mapping.pane_id, "trust, always allow");
     await ctx.reply(`Trusted ${mapping.label}`);
+  });
+
+  async function openNativeModelPicker(ctx: Context, label: "model" | "reasoning"): Promise<void> {
+    const threadId = ctx.message?.message_thread_id;
+    if (!threadId) {
+      await ctx.reply(`Send /${label} inside an agent topic.`);
+      return;
+    }
+    const mapping = findMapping(threadId, deps.map);
+    if (!mapping) {
+      await ctx.reply("No pane for this topic.");
+      return;
+    }
+    const pane = getAgents().find((candidate) => candidate.pane_id === mapping.pane_id);
+    if (deps.turns?.isBusy(mapping.pane_id) || (pane && pane.status !== "idle")) {
+      await ctx.reply(`Wait for ${mapping.label} to become idle before changing its ${label}.`);
+      return;
+    }
+    // Codex exposes model and reasoning selection through its native /model
+    // picker. Keep the catalog in Codex so it matches the signed-in account.
+    sendText(mapping.pane_id, "/model");
+    await ctx.reply(
+      label === "model"
+        ? "Codex model picker is open. Use the controls below, then Choose. Use /last to inspect the current picker."
+        : "Codex model and reasoning picker is open. Navigate to Low, Medium, or High, then Choose. Use /last to inspect the current picker.",
+      { reply_markup: nativeModelPickerKeyboard(mapping.pane_id) }
+    );
+  }
+
+  bot.command("model", async (ctx) => {
+    await openNativeModelPicker(ctx, "model");
+  });
+
+  bot.command("reasoning", async (ctx) => {
+    await openNativeModelPicker(ctx, "reasoning");
   });
 
   bot.command("last", async (ctx) => {
