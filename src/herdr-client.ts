@@ -176,14 +176,20 @@ export function getAgents(): PaneInfo[] {
 }
 
 export function buildSendTextArgs(paneId: string, text: string): string[] {
-  return ["agent", "prompt", paneId, text];
+  return ["pane", "send-text", paneId, text];
+}
+
+export function buildSubmitTextArgs(paneId: string): string[] {
+  // Herdr's named `enter` key is delivered as LF, which Codex treats as a
+  // multiline edit. The terminal CR byte is the actual Codex submit event.
+  return ["pane", "send-text", paneId, "\r"];
 }
 
 export function sendText(paneId: string, text: string): void {
-  // Agent prompt is Herdr's supported submission surface. It handles the
-  // live terminal protocol and starts a real agent turn; raw pane input does
-  // not reliably submit text in Codex's multiline composer.
+  // Send a literal prompt followed by CR. This is verified against Codex's
+  // multiline composer; `pane run`, `agent prompt`, and named Enter send LF.
   execHerdr(buildSendTextArgs(paneId, text));
+  execHerdr(buildSubmitTextArgs(paneId));
 }
 
 // `herdr pane send-keys` accepts named keys (Escape, Enter, Up, Down, etc.)

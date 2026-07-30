@@ -5,6 +5,7 @@ import { join } from "node:path";
 import {
   parseAgentList,
   buildSendTextArgs,
+  buildSubmitTextArgs,
   buildSendKeysArgs,
   buildWaitArgs,
   herdrBin,
@@ -98,9 +99,17 @@ describe("parseAgentList", () => {
 });
 
 describe("buildSendTextArgs", () => {
-  it("uses Herdr's agent prompt submission surface", () => {
+  it("builds a literal pane text input tuple", () => {
     expect(buildSendTextArgs("w1:pZ", "hello world")).toEqual([
-      "agent", "prompt", "w1:pZ", "hello world",
+      "pane", "send-text", "w1:pZ", "hello world",
+    ]);
+  });
+});
+
+describe("buildSubmitTextArgs", () => {
+  it("uses a raw carriage return instead of Herdr's LF Enter key", () => {
+    expect(buildSubmitTextArgs("w1:pZ")).toEqual([
+      "pane", "send-text", "w1:pZ", "\r",
     ]);
   });
 });
