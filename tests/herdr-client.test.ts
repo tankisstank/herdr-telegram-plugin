@@ -107,9 +107,9 @@ describe("buildSendTextArgs", () => {
 });
 
 describe("buildSubmitTextArgs", () => {
-  it("uses a raw carriage return instead of Herdr's LF Enter key", () => {
+  it("uses Ctrl+M so Herdr sends a terminal carriage-return key event", () => {
     expect(buildSubmitTextArgs("w1:pZ")).toEqual([
-      "pane", "send-text", "w1:pZ", "\r",
+      "agent", "send-keys", "w1:pZ", "Ctrl+m",
     ]);
   });
 });

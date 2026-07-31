@@ -195,9 +195,10 @@ export function buildSendTextArgs(paneId: string, text: string): string[] {
 }
 
 export function buildSubmitTextArgs(paneId: string): string[] {
-  // Herdr's named `enter` key is delivered as LF, which Codex treats as a
-  // multiline edit. The terminal CR byte is the actual Codex submit event.
-  return ["pane", "send-text", paneId, "\r"];
+  // `pane send-text` treats control characters as composer text on current
+  // Herdr builds. Ctrl+M carries the terminal CR/Enter key event through the
+  // agent input pipeline, while named Enter is normalized to LF by Herdr.
+  return ["agent", "send-keys", paneId, "Ctrl+m"];
 }
 
 /** Type text into the agent composer without submitting it. */
@@ -205,7 +206,7 @@ export function typeText(paneId: string, text: string): void {
   execHerdr(buildSendTextArgs(paneId, text));
 }
 
-/** Submit the current Codex composer using its carriage-return event. */
+/** Submit the current Codex composer using a terminal carriage-return key event. */
 export function submitText(paneId: string): void {
   execHerdr(buildSubmitTextArgs(paneId));
 }
