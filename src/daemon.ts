@@ -3,7 +3,7 @@ import { registerCommands, type CommandDeps } from "./commands.js";
 import { isPaired, updatePairing } from "./pairing.js";
 import { reconcile, findMapping, seedKnownTabs, restoreKnownTabMappings } from "./mapping.js";
 import { runAgentTurn, runAgentFollowLoop } from "./wait-loop.js";
-import { getAgents, readPane, sendText } from "./herdr-client.js";
+import { getAgents, readPane, sendText, submitText, typeText } from "./herdr-client.js";
 import { loadConfig } from "./config.js";
 import { loadState, saveState, rememberUpdateId } from "./state.js";
 import { createLogger, type Logger } from "./logger.js";
@@ -103,6 +103,42 @@ export async function startDaemon(
     expiresAt: number;
   }>();
   const APPROVAL_COMMENT_TIMEOUT_MS = 5 * 60_000;
+  const QUEUED_SUBMISSION_TIMEOUT_MS = 30 * 60_000;
+  const queuedSubmissions = new Map<string, { threadId: number; startedAt: number; timer?: ReturnType<typeof setTimeout> }>();
+
+  function queueComposerSubmission(paneId: string, threadId: number): void {
+    const existing = queuedSubmissions.get(paneId);
+    if (existing?.timer) clearTimeout(existing.timer);
+    const pending = existing ?? { threadId, startedAt: Date.now() };
+    pending.threadId = threadId;
+    queuedSubmissions.set(paneId, pending);
+
+    const poll = () => {
+      if (Date.now() - pending.startedAt > QUEUED_SUBMISSION_TIMEOUT_MS) {
+        queuedSubmissions.delete(paneId);
+        log.warn("Queued composer submission expired", { paneId, threadId: pending.threadId });
+        return;
+      }
+      const pane = getAgents().find((candidate) => candidate.pane_id === paneId);
+      if (!pane || pane.status === "working" || pane.status === "blocked") {
+        pending.timer = setTimeout(poll, 1_000);
+        return;
+      }
+      try {
+        submitText(paneId);
+        queuedSubmissions.delete(paneId);
+        log.info("Submitted queued composer prompt", { paneId, threadId: pending.threadId });
+      } catch (err) {
+        log.warn("Queued composer submit failed; retrying", {
+          paneId,
+          threadId: pending.threadId,
+          message: err instanceof Error ? err.message : String(err),
+        });
+        pending.timer = setTimeout(poll, 1_000);
+      }
+    };
+    pending.timer = setTimeout(poll, 1_000);
+  }
 
   function approvalResponseForKey(key: string): { kind: "text" | "key"; value: string } {
     const normalized = key.trim().toLowerCase();
@@ -185,7 +221,8 @@ export async function startDaemon(
       if (deps.follows) deps.follows.touch(threadId);
       if (turns.isBusy(mapping.pane_id)) {
         try {
-          sendText(mapping.pane_id, text);
+          typeText(mapping.pane_id, text);
+          queueComposerSubmission(mapping.pane_id, threadId);
         } catch (err) {
           log.error("Direct selected send failed", {
             paneId: mapping.pane_id,
@@ -614,7 +651,8 @@ export async function startDaemon(
     if (deps.follows) deps.follows.touch(threadId);
     if (turns.isBusy(mapping.pane_id) || agentAlreadyWorking) {
       try {
-        sendText(mapping.pane_id, text);
+        typeText(mapping.pane_id, text);
+        queueComposerSubmission(mapping.pane_id, threadId);
         await ctx.api.setMessageReaction(ctx.chat!.id, ctx.message!.message_id, [{ type: "emoji", emoji: "👀" }]);
       } catch {
         // reactions may be unavailable; ignore.

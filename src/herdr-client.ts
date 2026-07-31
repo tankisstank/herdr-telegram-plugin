@@ -200,11 +200,21 @@ export function buildSubmitTextArgs(paneId: string): string[] {
   return ["pane", "send-text", paneId, "\r"];
 }
 
+/** Type text into the agent composer without submitting it. */
+export function typeText(paneId: string, text: string): void {
+  execHerdr(buildSendTextArgs(paneId, text));
+}
+
+/** Submit the current Codex composer using its carriage-return event. */
+export function submitText(paneId: string): void {
+  execHerdr(buildSubmitTextArgs(paneId));
+}
+
 export function sendText(paneId: string, text: string): void {
   // Send a literal prompt followed by CR. This is verified against Codex's
   // multiline composer; `pane run`, `agent prompt`, and named Enter send LF.
-  execHerdr(buildSendTextArgs(paneId, text));
-  execHerdr(buildSubmitTextArgs(paneId));
+  typeText(paneId, text);
+  submitText(paneId);
 }
 
 // `herdr pane send-keys` accepts named keys (Escape, Enter, Up, Down, etc.)
