@@ -7,6 +7,7 @@ import { getAgents, readPane, sendText, submitText, typeText } from "./herdr-cli
 import { loadConfig } from "./config.js";
 import { loadState, saveState, rememberUpdateId } from "./state.js";
 import { createLogger, type Logger } from "./logger.js";
+import { MessageAuditLog } from "./message-audit-log.js";
 import { startWatcher } from "./watcher.js";
 import { FollowManager } from "./follow-manager.js";
 import { TurnDispatcher } from "./turn-dispatcher.js";
@@ -51,6 +52,9 @@ export async function startDaemon(
     process.env.XDG_STATE_HOME ?? path.join(homedir(), ".local", "state"),
     "herdr-telegram"
   );
+  const messageAudit = new MessageAuditLog(statePath, undefined, (error) => {
+    log.warn("Telegram message audit write failed", { error: error.message });
+  });
 
   let state = loadState(statePath);
   // Ensure known_topics is always initialized so in-place mutations persist
@@ -68,6 +72,7 @@ export async function startDaemon(
     },
     undefined,
     opts.customFetch,
+    messageAudit,
   );
 
   const startupPanes = isPaired(state) ? getAgents() : [];
@@ -140,29 +145,31 @@ export async function startDaemon(
     pending.timer = setTimeout(poll, 1_000);
   }
 
-  function approvalResponseForKey(key: string): { kind: "text" | "key"; value: string } {
+  function approvalResponseForKey(key: string): { kind: "keys" | "invalid"; values: string[] } {
     const normalized = key.trim().toLowerCase();
     // Approval callbacks must send the actual TUI shortcut. Sending the
     // human-readable option label makes the agent echo that label as input.
-    if (["yes", "y"].includes(normalized)) return { kind: "key", value: "y" };
-    if (["all", "p", "trust"].includes(normalized)) return { kind: "key", value: "p" };
-    if (["no", "n"].includes(normalized)) return { kind: "key", value: "n" };
-    if (["esc", "escape"].includes(normalized)) return { kind: "key", value: "Escape" };
-    return { kind: "text", value: normalized };
+    if (["yes", "y"].includes(normalized)) return { kind: "keys", values: ["y", "Enter"] };
+    if (["all", "p", "trust"].includes(normalized)) return { kind: "keys", values: ["p", "Enter"] };
+    if (["no", "n"].includes(normalized)) return { kind: "keys", values: ["n", "Enter"] };
+    if (["esc", "escape"].includes(normalized)) return { kind: "keys", values: ["Escape"] };
+    const index = normalized.match(/^index:(\d+)$/);
+    if (index) {
+      const target = Number(index[1]);
+      if (target >= 1 && target <= 12) {
+        return { kind: "keys", values: ["Home", ...Array.from({ length: target - 1 }, () => "Down"), "Enter"] };
+      }
+    }
+    return { kind: "invalid", values: [] };
   }
 
   function sendApprovalResponse(paneId: string, key: string): string {
     const response = approvalResponseForKey(key);
-    if (response.kind === "key") {
-      // Approval dialogs use their own key shortcuts and Enter confirmation;
-      // they must not receive Codex composer's Ctrl+Enter submit shortcut.
-      if (response.value === "Escape") sendKeys(paneId, response.value);
-      else sendKeys(paneId, response.value, "Enter");
-      return response.value;
+    if (response.kind === "keys") {
+      sendKeys(paneId, response.values[0], ...response.values.slice(1));
+      return response.values.join(" ");
     }
-    // Fallback free text is a normal Codex prompt.
-    sendText(paneId, response.value);
-    return response.value;
+    throw new Error(`Unsupported approval option: ${key}`);
   }
   /** Active background follow loops, keyed by threadId. Cancel the runner to stop. */
   const followLoops = new Map<number, { cancel: () => void }>();

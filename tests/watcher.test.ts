@@ -170,7 +170,7 @@ describe("syncTabs message ordering", () => {
 
     expect(sent.map((message) => message.text)).toEqual([
       "• Validation completed",
-      expect.stringContaining("needs input (working -> blocked)"),
+      expect.stringContaining("needs input."),
     ]);
   });
 
@@ -335,5 +335,54 @@ describe("syncTabs message ordering", () => {
     expect(callbackData[1]).toMatch(/^resp\|[a-f0-9]{12}\|p$/);
     expect(callbackData[2]).toMatch(/^respc\|[a-f0-9]{12}\|esc$/);
     expect(new Set(callbackData.map((value: string) => value.split("|")[1]))).toHaveLength(1);
+  });
+
+  it("edits the temporary final with the complete stable pane snapshot", async () => {
+    let pane = makePane({ tab_id: "w1:tA", pane_id: "w1:pA", status: "working" });
+    let output = "prompt";
+    const thinkingTracker = new ThinkingRelayTracker();
+    const sent: string[] = [];
+    const edits: string[] = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string) => {
+        sent.push(text);
+        return 42;
+      },
+      editMessageText: async (_chatId: number, _threadId: number, _messageId: number, text: string) => {
+        edits.push(text);
+      },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: { 10: { pane_id: pane.pane_id, label: pane.label, agent: pane.agent, created_at: "now" } },
+      known_tabs: { [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" } },
+    };
+
+    await syncTabs(1, telegram as any, state, {
+      map: new Map([[10, state.thread_mappings[10]]]),
+      thinkingTracker,
+      getAgents: () => [pane],
+      readPane: () => output,
+    });
+    pane = { ...pane, status: "idle" };
+    output = [
+      "prompt",
+      "Đã hoàn tất việc nâng cấp.",
+      "",
+      "### Chi tiết:",
+      "",
+      "1. **File XML**: Cập nhật đầy đủ.",
+    ].join("\n");
+    await syncTabs(1, telegram as any, state, {
+      map: new Map([[10, state.thread_mappings[10]]]),
+      thinkingTracker,
+      getAgents: () => [pane],
+      readPane: () => output,
+    });
+
+    expect(sent.some((text) => text.startsWith("✅ Hoàn tất"))).toBe(true);
+    expect(edits[0]).toContain("### Chi tiết:");
+    expect(edits[0]).toContain("**File XML**");
   });
 });

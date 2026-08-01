@@ -1,7 +1,7 @@
 const ANSI_ESCAPE = /\x1b\[[0-?]*[ -/]*[@-~]/g;
 const BULLET_START = /^\s*•\s+\S/;
 const MAX_RECENT_FINGERPRINTS = 200;
-const NON_THINKING_PREFIX = /^(?:working\b|ran\b|running\b|edited\b|added\b|removed\b|created\b|updated plan\b|read\b|wrote\b|opened\b|searched\b|tested\b|checked\b|built\b|fixed\b|applied\b|moved\b|deleted\b|started\b|stopped\b)/i;
+const NON_THINKING_PREFIX = /^(?:working\b|ran\b|running\b|edited\b|added\b|removed\b|created\b|updated plan\b|read\b|wrote\b|opened\b|searched\b|tested\b|checked\b|built\b|fixed\b|applied\b|moved\b|deleted\b|started\b|stopped\b|spawned\b|closed\b|waiting\b|finished waiting\b|sent input\b)/i;
 
 function normalizeSnapshot(raw: string): string {
   return raw
@@ -82,6 +82,15 @@ function fingerprint(block: string): string {
   return block.replace(/\s+/g, " ").trim();
 }
 
+function isRedrawDuplicate(current: string, previous: string): boolean {
+  if (current === previous || current.startsWith(previous) || previous.startsWith(current)) return true;
+  let common = 0;
+  while (common < current.length && common < previous.length && current[common] === previous[common]) common++;
+  const longest = Math.max(current.length, previous.length);
+  const shortest = Math.min(current.length, previous.length);
+  return common >= 60 && shortest / longest >= 0.72;
+}
+
 /**
  * Keeps a per-pane terminal snapshot and returns only newly observed bullet
  * blocks. The first snapshot is a baseline so daemon restarts do not replay
@@ -102,7 +111,7 @@ export class ThinkingRelayTracker {
     const fresh: string[] = [];
     for (const block of extractThinkingBlocks(source)) {
       const key = fingerprint(block);
-      if (!key || seenSet.has(key)) continue;
+      if (!key || seenSet.has(key) || seen.some((previous) => isRedrawDuplicate(key, previous))) continue;
       seen.push(key);
       seenSet.add(key);
       if (previous !== undefined && emit) fresh.push(block);

@@ -11,6 +11,7 @@ import type { Config } from "./config.js";
 import { stripStatusBar } from "./wait-loop.js";
 import { getAgentInfo, readPane as herdrReadPane } from "./herdr-client.js";
 import type { PaneInfo } from "./types.js";
+import { splitTelegramText } from "./telegram-text.js";
 
 export interface ObserveLoopDeps {
   readPane: (paneId: string, lines: number) => string;
@@ -52,6 +53,7 @@ export function isIdle(c: ObserveStopCondition): c is IdleStopCondition {
 export interface ObserveFinalSource {
   /** Why did this loop end? */
   source: "idle" | "follow-timeout" | "signal-abort";
+  elapsedSec?: number;
 }
 
 export interface ObserveOutputFormatter {
@@ -113,13 +115,13 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
 
   while (true) {
     if (opts.signal?.aborted) {
-      await finalize(opts, deps, lastSnapshot, "signal-abort", lastDeltaText);
+      await finalize(opts, deps, lastSnapshot, "signal-abort", lastDeltaText, Math.floor((deps.now() - startedAt) / 1000));
       return;
     }
 
     await deps.sleep(tickMs);
     if (opts.signal?.aborted) {
-      await finalize(opts, deps, lastSnapshot, "signal-abort", lastDeltaText);
+      await finalize(opts, deps, lastSnapshot, "signal-abort", lastDeltaText, Math.floor((deps.now() - startedAt) / 1000));
       return;
     }
 
@@ -198,14 +200,14 @@ export async function runObserveLoop(opts: RunObserveLoopOptions): Promise<void>
         (agentStatus === "idle" || agentStatus === "done" || agentStatus === "unknown") &&
         deps.now() - lastChangeAt >= stabilityMs
       ) {
-        await finalize(opts, deps, lastSnapshot, "idle", lastDeltaText);
+        await finalize(opts, deps, lastSnapshot, "idle", lastDeltaText, elapsedSec);
         return;
       }
     } else if (opts.stopCondition.kind === "follow") {
       const expiresAt = opts.stopCondition.expiresAt();
       if (expiresAt !== null && deps.now() >= expiresAt) {
         opts.stopCondition.onExpired?.();
-        await finalize(opts, deps, lastSnapshot, "follow-timeout", lastDeltaText);
+        await finalize(opts, deps, lastSnapshot, "follow-timeout", lastDeltaText, elapsedSec);
         return;
       }
     }
@@ -218,6 +220,7 @@ async function finalize(
   lastSnapshot: string,
   source: ObserveFinalSource["source"],
   fallback: string = "",
+  elapsedSec = 0,
 ): Promise<void> {
   // Prefer the last delta we emitted: the user has already seen it on
   // Telegram, the Final message just confirms the turn ended. Falling
@@ -237,15 +240,18 @@ async function finalize(
   }
   let text: string;
   if (source === "follow-timeout") {
-    text = opts.output.expiredMessage?.() ?? opts.output.finalMessage(finalPayload, { source });
+    text = opts.output.expiredMessage?.() ?? opts.output.finalMessage(finalPayload, { source, elapsedSec });
   } else if (source === "signal-abort") {
-    text = opts.output.abortedMessage?.() ?? opts.output.finalMessage(finalPayload, { source });
+    text = opts.output.abortedMessage?.() ?? opts.output.finalMessage(finalPayload, { source, elapsedSec });
   } else {
-    text = opts.output.finalMessage(finalPayload, { source });
+    text = opts.output.finalMessage(finalPayload, { source, elapsedSec });
   }
-  await deps.sendMessage(opts.chatId, opts.threadId, text, {
-    reply_markup: opts.output.finalKeyboard?.(),
-  });
+  const chunks = splitTelegramText(text);
+  for (const [index, chunk] of chunks.entries()) {
+    await deps.sendMessage(opts.chatId, opts.threadId, chunk, {
+      reply_markup: index === chunks.length - 1 ? opts.output.finalKeyboard?.() : undefined,
+    });
+  }
 }
 
 function readSnapshot(paneId: string, maxLines: number, deps: ObserveLoopDeps): string {

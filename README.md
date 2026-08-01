@@ -74,6 +74,10 @@ The daemon must be running to receive Telegram updates. Its state and PID are st
 
 Long-polling retries temporary Telegram failures, including a `409 Conflict` after a supervised restart. Use `node dist/index.js --status` to confirm that polling is running.
 
+Every outbound Telegram message is recorded before the Bot API call in `~/.local/state/herdr-telegram/telegram-messages.jsonl`. A matching `sent` or `failed` record follows with the same sequence number, making message order and delivery failures auditable. The active file rotates at 20 MB to `telegram-messages.jsonl.1`.
+
+The audit file contains complete agent and user-facing message bodies. Treat it as sensitive local data and do not publish it without redaction.
+
 In the target Telegram Forum supergroup, send `/pair`. The bot creates or reconciles one topic per current agent tab. From then on, only that paired chat can use the bot.
 
 ## Topic Workflow
@@ -215,8 +219,11 @@ Run `/model` or `/reasoning` inside an **idle** Codex topic. Telegram shows the 
 
 - All control messages are authorized against the paired chat before command or callback handling.
 - Approval choices are bound to the exact prompt that created them.
+- Approval dialogs are parsed from the newest anchored TUI prompt; uncertain prompts are reported without action buttons instead of guessing.
 - A blocked agent never receives ordinary topic text; use its current approval controls instead.
 - Telegram output for a topic is serialized to preserve progress, approval, and final-message order.
+- Tool lifecycle bullets such as `Spawned`, `Waiting`, and `Closed` are suppressed; narrative progress remains separate and completed turns are emitted as a final message.
+- Telegram message attempts and delivery results are retained as structured JSONL for presentation and ordering diagnostics.
 - State files are written through a temporary file then renamed to avoid corruption on interruption.
 - A normal observed turn stops on blocked state and has a configured hard timeout; it does not publish a false final response while an approval is waiting.
 

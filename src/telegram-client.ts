@@ -1,5 +1,6 @@
 import { Bot } from "grammy";
 import type { TopicInfo } from "./types.js";
+import type { MessageAuditLog } from "./message-audit-log.js";
 
 export type PollingState = "starting" | "running" | "retrying" | "failed" | "stopped";
 
@@ -13,6 +14,21 @@ export interface PollingStatus {
 type PollingObserver = (status: PollingStatus) => void;
 
 const RETRYABLE_HTTP_CODES = new Set([409, 429, 500, 502, 503, 504]);
+const MESSAGE_MUTATIONS = new Set([
+  "sendMessage",
+  "editMessageText",
+  "editMessageCaption",
+  "sendPhoto",
+  "sendDocument",
+  "sendVideo",
+  "sendAudio",
+  "sendVoice",
+  "sendAnimation",
+]);
+
+function isMessageMutation(method: PropertyKey): boolean {
+  return MESSAGE_MUTATIONS.has(String(method));
+}
 
 function errorCode(err: unknown): number | undefined {
   const e = err as { error_code?: unknown; error?: { error_code?: unknown } };
@@ -64,10 +80,26 @@ export class TelegramClient {
     /** Custom fetch implementation. Test rigs pass a mocked fetch to keep
      *  grammy from hitting the real Telegram network. */
     customFetch?: typeof fetch,
+    messageAudit?: MessageAuditLog,
   ) {
     this.bot = bot ?? (customFetch
       ? new Bot(token, { client: { fetch: customFetch as never } })
       : new Bot(token));
+    if (messageAudit && this.bot.api?.config?.use) {
+      this.bot.api.config.use(async (prev, method, payload, signal) => {
+        if (!isMessageMutation(method)) return prev(method, payload, signal);
+        const sequence = messageAudit.begin(method, payload as Record<string, unknown>);
+        try {
+          const result = await prev(method, payload, signal);
+          if (result.ok) messageAudit.sent(sequence, method, result.result);
+          else messageAudit.failed(sequence, method, new Error(`${result.error_code}: ${result.description}`));
+          return result;
+        } catch (error) {
+          messageAudit.failed(sequence, method, error);
+          throw error;
+        }
+      });
+    }
   }
 
   getPollingStatus(): PollingStatus {
@@ -185,7 +217,7 @@ export class TelegramClient {
     chatId: number,
     threadId: number,
     text: string,
-    opts?: { disable_notification?: boolean; reply_markup?: unknown }
+    opts?: { disable_notification?: boolean; reply_markup?: unknown; parse_mode?: "HTML" | "MarkdownV2" }
   ): Promise<number> {
     const queueKey = `${chatId}:${threadId}`;
     const previous = this.sendQueues.get(queueKey) ?? Promise.resolve();
@@ -193,6 +225,7 @@ export class TelegramClient {
       const msg = await this.bot.api.sendMessage(chatId, text, {
         message_thread_id: threadId,
         disable_notification: opts?.disable_notification ?? false,
+        parse_mode: opts?.parse_mode,
         reply_markup: opts?.reply_markup as any,
       });
       return msg.message_id;
@@ -210,6 +243,30 @@ export class TelegramClient {
     await this.bot.api.editMessageReplyMarkup(chatId, messageId, {
       reply_markup: undefined,
     });
+  }
+
+  async editMessageText(
+    chatId: number,
+    threadId: number,
+    messageId: number,
+    text: string,
+    opts?: { reply_markup?: unknown; parse_mode?: "HTML" | "MarkdownV2" },
+  ): Promise<void> {
+    const queueKey = `${chatId}:${threadId}`;
+    const previous = this.sendQueues.get(queueKey) ?? Promise.resolve();
+    const task = previous.catch(() => undefined).then(async () => {
+      await this.bot.api.editMessageText(chatId, messageId, text, {
+        parse_mode: opts?.parse_mode,
+        reply_markup: opts?.reply_markup as any,
+      });
+    });
+    const tail = task.then(() => undefined, () => undefined);
+    this.sendQueues.set(queueKey, tail);
+    try {
+      await task;
+    } finally {
+      if (this.sendQueues.get(queueKey) === tail) this.sendQueues.delete(queueKey);
+    }
   }
 
   async validatePermissions(chatId: number): Promise<string[]> {

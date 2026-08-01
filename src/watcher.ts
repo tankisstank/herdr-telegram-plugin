@@ -5,6 +5,9 @@ import { getAgents, readPane } from "./herdr-client.js";
 import { createLogger } from "./logger.js";
 import { topicNameForPane } from "./topic-names.js";
 import { ThinkingRelayTracker } from "./thinking-relay.js";
+import { parseInteractivePrompt, type ParsedInteractivePrompt as InteractivePrompt } from "./prompt-parser.js";
+import { formatApprovalMessage } from "./telegram-format.js";
+import { extractFinalSnapshot, splitFinalSnapshot } from "./final-snapshot.js";
 
 const log = createLogger("watcher");
 
@@ -16,27 +19,18 @@ interface WatcherDeps {
   readPane?: (paneId: string, lines: number) => string;
 }
 
-interface PromptOption {
-  index: string;
-  label: string;
-  key: string;
-  wantsComment: boolean;
-}
-
-interface InteractivePrompt {
-  text: string;
-  options: PromptOption[];
-}
-
-function optionButtonText(option: PromptOption): string {
+function optionButtonText(option: InteractivePrompt["options"][number]): string {
   const normalized = option.label.toLowerCase();
   if (/yes|approve|proceed/.test(normalized) && !/again|always|don't ask/.test(normalized)) return "Yes";
+  if (/always allow in this conversation/.test(normalized)) return "Allow here";
+  if (/persist to settings|always allow for commands/.test(normalized)) return "Always allow";
   if (/always|don't ask|dont ask|all|trust/.test(normalized)) return "All";
   if (/no|cancel|different|esc/.test(normalized)) return option.wantsComment ? "No + comment" : "No";
   return option.label.length > 28 ? option.label.slice(0, 25) + "..." : option.label;
 }
 
-function promptKeyboard(options: PromptOption[], promptId: string) {
+function promptKeyboard(prompt: InteractivePrompt, promptId: string) {
+  const options = prompt.options;
   const buttons = options.slice(0, 6).map((option) => ({
     text: optionButtonText(option),
     callback_data: `${option.wantsComment ? "respc" : "resp"}|${promptId}|${option.key}`,
@@ -48,94 +42,8 @@ function promptKeyboard(options: PromptOption[], promptId: string) {
   ]] };
 }
 
-function parseOption(line: string): PromptOption | null {
-  const trimmed = line.trim();
-  const match = trimmed.match(/^›?\s*(\d+)[.)]\s+(.+?)\s*$/);
-  if (!match) return null;
-  const index = match[1];
-  let label = match[2].trim();
-  const keyMatch = label.match(/\(([^()]+)\)\s*$/);
-  const key = keyMatch ? keyMatch[1].trim().toLowerCase() : index;
-  if (keyMatch) label = label.slice(0, keyMatch.index).trim();
-  const wantsComment = /tell .* differently|what to do differently|\bcomment\b|\breason\b|\bedit\b/i.test(label);
-  return { index, label, key, wantsComment };
-}
-
-function extractInteractivePrompt(raw: string): InteractivePrompt {
-  const allLines = raw.split("\n").map((line) => line.trimEnd());
-  const optionLines: Array<{ line: string; index: number; option: PromptOption }> = [];
-  const promptHeaderPattern = /^(Would you like|Do you want|Choose|Select|Which|How should|What should|Bạn có muốn|Hãy chọn|Chọn)/i;
-  for (let i = 0; i < allLines.length; i++) {
-    const option = parseOption(allLines[i]);
-    if (option) optionLines.push({ line: allLines[i], index: i, option });
-  }
-  if (optionLines.length === 0) {
-    const fallback = allLines.filter((line) => line.trim()).slice(-18).join("\n").trim();
-    return { text: fallback.length > 1400 ? fallback.slice(-1400) : fallback, options: [] };
-  }
-
-  // Anchor to the newest question header. Long commands and option labels wrap
-  // over several terminal lines, so physical line adjacency cannot delimit an
-  // option group reliably.
-  let start = -1;
-  for (let i = allLines.length - 1; i >= 0; i--) {
-    if (promptHeaderPattern.test(allLines[i].trim())) {
-      start = i;
-      break;
-    }
-  }
-  const currentOptions = start >= 0
-    ? optionLines.filter((entry) => entry.index > start)
-    : optionLines;
-  if (currentOptions.length === 0) {
-    const fallbackLines = start >= 0 ? allLines.slice(start) : allLines;
-    const fallback = fallbackLines.filter((line) => line.trim()).slice(-18).join("\n").trim();
-    return { text: fallback.length > 1400 ? fallback.slice(-1400) : fallback, options: [] };
-  }
-
-  const lastOptionIndex = currentOptions.at(-1)!.index;
-  let end = lastOptionIndex + 1;
-  let optionBlockEnd = end;
-  for (let i = end; i < allLines.length; i++) {
-    if (/Press enter|confirm|cancel/i.test(allLines[i])) {
-      optionBlockEnd = i;
-      end = i + 1;
-      break;
-    }
-  }
-  const trailingLines = allLines.slice(end).filter((line) => line.trim());
-  if (trailingLines.some((line) => !/Press enter|confirm|cancel/i.test(line))) {
-    const fallback = allLines.filter((line) => line.trim()).slice(-18).join("\n").trim();
-    return { text: fallback.length > 1400 ? fallback.slice(-1400) : fallback, options: [] };
-  }
-
-  const firstOptionIndex = currentOptions[0].index;
-  if (start < 0) {
-    start = Math.max(0, firstOptionIndex - 12);
-  }
-  const parsedOptions = currentOptions.map((entry, index) => {
-    const nextOptionIndex = currentOptions[index + 1]?.index ?? optionBlockEnd;
-    const wrapped = allLines
-      .slice(entry.index, nextOptionIndex)
-      .filter((line) => line.trim())
-      .map((line) => line.trim())
-      .join(" ");
-    return parseOption(wrapped) ?? entry.option;
-  });
-
-  const text = allLines
-    .slice(start, end)
-    .filter((line) => line.trim())
-    .join("\n")
-    .trim();
-  return {
-    text: text.length > 1800 ? text.slice(-1800) : text,
-    options: parsedOptions,
-  };
-}
-
 function promptFingerprint(prompt: InteractivePrompt): string | undefined {
-  if (!prompt.text || prompt.options.length === 0) return undefined;
+  if (prompt.confidence !== "high" || !prompt.text || prompt.options.length === 0) return undefined;
   const normalized = JSON.stringify({
     text: prompt.text.replace(/\s+/g, " ").trim(),
     options: prompt.options.map(({ index, label, key, wantsComment }) => ({
@@ -153,9 +61,9 @@ function blockedPrompt(
   paneReader: (paneId: string, lines: number) => string = readPane,
 ): InteractivePrompt {
   try {
-    return extractInteractivePrompt(paneReader(pane.pane_id, 160));
+    return parseInteractivePrompt(paneReader(pane.pane_id, 160));
   } catch {
-    return { text: "", options: [] };
+    return { adapter: "generic", text: "", options: [], confidence: "low" };
   }
 }
 
@@ -168,10 +76,10 @@ function blockedMessage(
   const body = prompt.text ? `\n\n${prompt.text}` : "";
   const heading = previous === "blocked"
     ? `${pane.label} has a new input request.`
-    : `${pane.label} needs input (${previous} -> blocked).`;
+    : `${pane.label} needs input.`;
   return {
-    text: `${heading}${body}`,
-    reply_markup: promptKeyboard(prompt.options, fingerprint.slice(0, 12)),
+    text: formatApprovalMessage(heading, prompt.text),
+    reply_markup: promptKeyboard(prompt, fingerprint.slice(0, 12)),
   };
 }
 
@@ -319,16 +227,46 @@ export async function syncTabs(
       const existing = knownTabs[pane.tab_id];
       if (!existing) continue;
       try {
+        const previousStatus = existing.status;
         const raw = (deps.readPane ?? readPane)(pane.pane_id, 400);
         const blocks = deps.thinkingTracker.capture(
           pane.pane_id,
           raw,
           !deps.isPaneObserved?.(pane.pane_id),
         );
-        for (const block of blocks) {
-          await tg.sendMessage(chatId, existing.thread_id, block, {
-            disable_notification: true,
-          });
+        const observed = Boolean(deps.isPaneObserved?.(pane.pane_id));
+        const fullSnapshot = extractFinalSnapshot(raw);
+        const completed = !observed &&
+          (pane.status === "idle" || pane.status === "done") &&
+          (previousStatus === "working" || previousStatus === "blocked") &&
+          fullSnapshot.length > 0;
+        if (completed) {
+          const summary = blocks.length > 0
+            ? `✅ Hoàn tất\n\n${blocks.join("\n\n")}`
+            : "✅ Hoàn tất";
+          const messageId = await tg.sendMessage(chatId, existing.thread_id, summary);
+          const fullChunks = splitFinalSnapshot(fullSnapshot || summary);
+          if (fullChunks.length > 0 && "editMessageText" in tg) {
+            await tg.editMessageText(
+              chatId,
+              existing.thread_id,
+              messageId,
+              `✅ Hoàn tất\n\n${fullChunks[0]}`,
+            );
+            for (const chunk of fullChunks.slice(1)) {
+              await tg.sendMessage(chatId, existing.thread_id, chunk);
+            }
+          } else {
+            for (const chunk of fullChunks.slice(1)) {
+              await tg.sendMessage(chatId, existing.thread_id, chunk);
+            }
+          }
+        } else if (!observed && (pane.status === "working" || pane.status === "blocked")) {
+          for (const block of blocks) {
+            await tg.sendMessage(chatId, existing.thread_id, block, {
+              disable_notification: true,
+            });
+          }
         }
       } catch (err: any) {
         log.warn("watcher: failed to relay thinking", {
@@ -373,23 +311,26 @@ export async function syncTabs(
             chatId,
             existing.thread_id,
             message.text,
-            { reply_markup: message.reply_markup }
+            { reply_markup: message.reply_markup, parse_mode: "HTML" }
           );
           existing.last_blocked_prompt_fingerprint = fingerprint;
+          existing.last_blocked_prompt_message_id = messageId;
+          promptsSent.push(pane.label);
+        } else if (!fingerprint && previous !== "blocked" && prompt.text) {
+          const messageId = await tg.sendMessage(
+            chatId,
+            existing.thread_id,
+            `⚠️ ${pane.label} needs input, but the prompt could not be parsed safely.\n\n${prompt.text}\n\nUse /last or respond from the Herdr pane.`,
+          );
+          existing.last_blocked_prompt_fingerprint = "unparsed";
           existing.last_blocked_prompt_message_id = messageId;
           promptsSent.push(pane.label);
         }
       } else {
         delete existing.last_blocked_prompt_fingerprint;
         delete existing.last_blocked_prompt_message_id;
-        if (statusTransition) {
-          await tg.sendMessage(
-            chatId,
-            existing.thread_id,
-            `Status: ${previous} -> ${pane.status}`,
-            { disable_notification: true }
-          );
-        }
+        // Normal working/idle/done transitions are represented by progress or
+        // the final message. Keep status messages for blocked and errors only.
       }
     } catch (err: any) {
       log.warn("watcher: failed to send status update", {

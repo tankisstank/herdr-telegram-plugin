@@ -123,6 +123,16 @@ if (cmd === "agent") {
     process.stdout.write(JSON.stringify({ result: { agent: { pane_id: target, agent: "pi", agent_status: a.status, agent_session: { agent: "pi", kind: "path", source: "mock", value: "/tmp/session.jsonl" }, cwd: "/tmp", focused: true, foreground_cwd: "/tmp", tab_id: "t1", workspace_id: "w1", terminal_id: "term1" } }, type: "agent_info" }));
     process.exit(0);
   }
+  if (sub === "send-keys") {
+    const paneId = args[2];
+    const keys = args.slice(3);
+    const s = readState();
+    const pane = getPane(paneId);
+    pane.key_history.push(...keys);
+    s.panes[paneId] = pane;
+    writeState(s);
+    process.exit(0);
+  }
 }
 if (cmd === "pane") {
   const sub = args[1];

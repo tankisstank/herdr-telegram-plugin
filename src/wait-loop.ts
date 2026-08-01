@@ -185,7 +185,7 @@ export async function runAgentTurn(
           ? `⏳ Working (${formatElapsed(elapsedSec)}).`
           : `⏳ Working (${formatElapsed(elapsedSec)}, follow expires in ${formatExpiresIn(followExpiresInMs)}).`,
       paneDelta: (delta) => delta,
-      finalMessage: (text) => `✅ (${formatElapsed(0)}):\n\n${text}`,
+      finalMessage: (text, ctx) => `✅ (${formatElapsed(ctx.elapsedSec ?? 0)}):\n\n${text}`,
       workingKeyboard: () => workingKeyboard(threadId, opts.hasFollow ?? false),
       finalKeyboard: () => finalKeyboard(threadId, opts.hasFollow ?? false),
     },

@@ -68,6 +68,19 @@ describe("extractThinkingBlocks", () => {
   });
 
 describe("ThinkingRelayTracker", () => {
+  it("drops tool lifecycle bullets instead of relaying them as thinking", () => {
+    const tracker = new ThinkingRelayTracker();
+    tracker.capture("pane", "baseline");
+    expect(tracker.capture("pane", [
+      "baseline",
+      "• Spawned worker-1",
+      "• Waiting for 3 agents",
+      "• Finished waiting",
+      "• Sent input to worker-1",
+      "• Tôi đang kiểm tra kết quả.",
+    ].join("\n"))).toEqual(["• Tôi đang kiểm tra kết quả."]);
+  });
+
   it("uses the first pane read as a baseline and emits only appended bullets", () => {
     const tracker = new ThinkingRelayTracker();
     expect(tracker.capture("1-1", "prompt\n• Existing update")).toEqual([]);

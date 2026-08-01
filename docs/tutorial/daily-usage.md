@@ -43,13 +43,21 @@ All commands work in any topic or in the main forum chat.
 # Check daemon status
 node dist/index.js --status
 
-# Watch logs
-tail -f /tmp/daemon-*.log
+# Watch messages sent to Telegram
+tail -f ~/.local/state/herdr-telegram/telegram-messages.jsonl
 
 # Restart the daemon
 kill $(cat ~/.local/state/herdr-telegram/daemon.pid)
 node dist/index.js --daemon
 ```
+
+On PowerShell, watch the same audit log with:
+
+```powershell
+Get-Content "$HOME\.local\state\herdr-telegram\telegram-messages.jsonl" -Wait
+```
+
+Each outbound call is written as an `attempt` record before it reaches Telegram, followed by a `sent` or `failed` record with the same `sequence`. The file contains complete message bodies and rotates at 20 MB, so handle it as sensitive local data.
 
 ## Troubleshooting
 
