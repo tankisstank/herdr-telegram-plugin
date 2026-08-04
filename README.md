@@ -74,6 +74,53 @@ The daemon must be running to receive Telegram updates. Its state and PID are st
 
 Long-polling retries temporary Telegram failures, including a `409 Conflict` after a supervised restart. Use `node dist/index.js --status` to confirm that polling is running.
 
+### Keep the daemon running on Windows
+
+The Herdr event hook already restarts the daemon after the next
+`pane.agent_status_changed` event if it is not running. For recovery after a
+machine restart, a Herdr restart with no immediate agent event, or a daemon
+crash while no agents are changing state, use Windows Task Scheduler under the
+**same Windows account that runs Herdr**. Do not use `SYSTEM`: the bridge must
+access that user's Herdr session and Telegram configuration.
+
+Run the following once from an elevated or normal PowerShell session for that
+user. It creates a logon task that retries a failed daemon every minute, plus a
+watchdog that starts it again if it has stopped:
+
+```powershell
+$repo = "E:\\repo\\herdr-telegram-plugin"
+$node = (Get-Command node.exe).Source
+$user = "$env:USERDOMAIN\\$env:USERNAME"
+$principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
+
+$daemonAction = New-ScheduledTaskAction -Execute $node -Argument "`"$repo\\dist\\index.js`" --daemon" -WorkingDirectory $repo
+$logonTrigger = New-ScheduledTaskTrigger -AtLogOn -User $user
+$daemonSettings = New-ScheduledTaskSettingsSet -RestartCount 999 -RestartInterval (New-TimeSpan -Minutes 1) -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0)
+Register-ScheduledTask -TaskName "Herdr Telegram Bridge" -Action $daemonAction -Trigger $logonTrigger -Settings $daemonSettings -Principal $principal -Force
+
+$watchdogAction = New-ScheduledTaskAction -Execute "powershell.exe" -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$repo\\scripts\\herdr-telegram-watchdog.ps1`"" -WorkingDirectory $repo
+$watchdogTrigger = New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 3) -RepetitionDuration (New-TimeSpan -Days 9999)
+$watchdogSettings = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Minutes 1)
+Register-ScheduledTask -TaskName "Herdr Telegram Bridge Watchdog" -Action $watchdogAction -Trigger $watchdogTrigger -Settings $watchdogSettings -Principal $principal -Force
+```
+
+Verify the daemon and tasks:
+
+```powershell
+node dist/index.js --status
+Get-ScheduledTask -TaskName "Herdr Telegram Bridge", "Herdr Telegram Bridge Watchdog"
+```
+
+To remove the automation later:
+
+```powershell
+Unregister-ScheduledTask -TaskName "Herdr Telegram Bridge", "Herdr Telegram Bridge Watchdog" -Confirm:$false
+```
+
+The bridge retains pairing and topic mappings across restarts. Active `/follow`
+subscriptions are intentionally in-memory and must be started again after a
+daemon restart.
+
 Every outbound Telegram message is recorded before the Bot API call in `~/.local/state/herdr-telegram/telegram-messages.jsonl`. A matching `sent` or `failed` record follows with the same sequence number, making message order and delivery failures auditable. The active file rotates at 20 MB to `telegram-messages.jsonl.1`.
 
 The audit file contains complete agent and user-facing message bodies. Treat it as sensitive local data and do not publish it without redaction.
