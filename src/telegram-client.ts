@@ -172,6 +172,7 @@ export class TelegramClient {
       { command: "follow", description: "Follow updates in this topic" },
       { command: "unfollow", description: "Stop following this topic" },
       { command: "stop", description: "Soft stop this topic's agent" },
+      { command: "submit", description: "Submit text already in the agent composer" },
       { command: "interrupt", description: "Hard interrupt an agent" },
       { command: "trust", description: "Trust tools for an agent" },
       { command: "model", description: "Choose this agent's Codex model" },

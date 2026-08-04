@@ -14,12 +14,27 @@ export interface ParsedInteractivePrompt {
   confidence: "high" | "low";
 }
 
-const HEADER = /^(?:[>?›]\s*)?(?:would you like|do you want|choose|select|which|how should|what should|bạn\s+(?:có\s+)?muốn|hãy chọn|chọn)\b|\?\s*\S|\S.*\?\s*$/i;
+const KNOWN_HEADER = /^(?:[>?›]\s*)?(?:would you like|do you want|choose|select|which|how should|what should|bạn\s+(?:có\s+)?muốn|hãy chọn|chọn)\b|^\?\s*\S/i;
 const OPTION = /^\s*([>›])?\s*(\d+)[.)]\s+(.+?)\s*$/;
 const FOOTER = /^(?:press enter|enter to confirm|confirm|cancel|esc to cancel|[↑↓←→].*(?:navigate|amend)|.*ctrl[+ ]g.*(?:edit|expand)|.*esc to cancel)/i;
+const CODE_LIKE_HEADER = /(?:\b(?:const|let|var|function|class|def|import|from)\b|=>|==|!=|:=|\.compile\s*\(|[{};]|<!--|\b(?:re|path|os)\.)/i;
 
 function cleanLine(line: string): string {
   return line.replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "").replace(/\r/g, "").trimEnd();
+}
+
+function isPromptHeader(line: string): boolean {
+  const trimmed = line.trim();
+  if (KNOWN_HEADER.test(trimmed)) return true;
+  if (!trimmed.endsWith("?") || CODE_LIKE_HEADER.test(trimmed)) return false;
+  return /^[\p{L}\p{N}]/u.test(trimmed);
+}
+
+function headerPriority(line: string): number {
+  const trimmed = line.trim();
+  if (/^\?\s*\S/.test(trimmed)) return 3;
+  if (KNOWN_HEADER.test(trimmed)) return 2;
+  return 1;
 }
 
 function parseOption(line: string): ParsedInteractivePrompt["options"][number] | null {
@@ -51,25 +66,41 @@ function adapterFor(lines: string[], headerIndex: number): ParsedInteractiveProm
 
 export function parseInteractivePrompt(raw: string): ParsedInteractivePrompt {
   const lines = raw.split("\n").map(cleanLine);
-  const candidates: Array<{ headerIndex: number; firstOption: number; options: Array<{ lineIndex: number; option: ParsedInteractivePrompt["options"][number] }> }> = [];
+  const candidates: Array<{ headerIndex: number; headerPriority: number; firstOption: number; options: Array<{ lineIndex: number; option: ParsedInteractivePrompt["options"][number] }> }> = [];
 
-  for (let headerIndex = Math.max(0, lines.length - 100); headerIndex < lines.length; headerIndex++) {
-    if (!HEADER.test(lines[headerIndex].trim())) continue;
+  for (let headerIndex = Math.max(0, lines.length - 600); headerIndex < lines.length; headerIndex++) {
+    if (!isPromptHeader(lines[headerIndex])) continue;
     const options: Array<{ lineIndex: number; option: ParsedInteractivePrompt["options"][number] }> = [];
     let firstOption = -1;
+    let expectedIndex = 1;
     for (let i = headerIndex + 1; i < lines.length; i++) {
       const parsed = parseOption(lines[i]);
       if (parsed) {
-        if (firstOption < 0) firstOption = i;
+        // Interactive menus always render one selected row. Ignore numbered
+        // code/report lines before that anchor, then accept only a sequential
+        // option block.
+        if (firstOption < 0) {
+          if (!parsed.selected || Number(parsed.index) !== 1) continue;
+          firstOption = i;
+          expectedIndex = 1;
+        }
+        if (Number(parsed.index) !== expectedIndex) break;
         options.push({ lineIndex: i, option: parsed });
+        expectedIndex++;
         continue;
       }
       if (firstOption >= 0 && FOOTER.test(lines[i].trim())) break;
     }
-    if (firstOption >= 0 && options.length >= 2) candidates.push({ headerIndex, firstOption, options });
+    if (firstOption >= 0 && options.length >= 2) {
+      candidates.push({ headerIndex, headerPriority: headerPriority(lines[headerIndex]), firstOption, options });
+    }
   }
 
-  const candidate = candidates.at(-1);
+  const latestFirstOption = candidates.reduce((latest, item) => Math.max(latest, item.firstOption), -1);
+  const candidate = candidates
+    .filter((item) => item.firstOption === latestFirstOption)
+    .sort((a, b) => a.headerPriority - b.headerPriority || a.headerIndex - b.headerIndex)
+    .at(-1);
   if (!candidate) return { adapter: "generic", text: "", options: [], confidence: "low" };
 
   const options = candidate.options.map(({ option, lineIndex }, index) => {

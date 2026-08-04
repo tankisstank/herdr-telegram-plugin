@@ -120,6 +120,8 @@ export const defaultWaitLoopDeps: WaitLoopDeps = {
 
 export interface RunAgentTurnOptions {
   maxOutputLines?: number;
+  /** Agent-specific composer semantics. Agy submits with Enter; Codex uses CR. */
+  agent?: string;
   /** Test override. Production uses telegram.progress_interval_ms. */
   pollIntervalMs?: number;
   stabilityWindowMs?: number;
@@ -163,7 +165,8 @@ export async function runAgentTurn(
   }
 
   // Submit the prompt immediately — pass-through to the pane.
-  (opts.deps?.sendText ?? sendText)(paneId, text);
+  if (opts.deps?.sendText) opts.deps.sendText(paneId, text);
+  else sendText(paneId, text, opts.agent);
 
   // Lazily require to avoid the spawnSync cost when tests inject mocks.
   const { runObserveLoop } = await import("./observe-loop.js");

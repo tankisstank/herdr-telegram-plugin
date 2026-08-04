@@ -194,11 +194,15 @@ export function buildSendTextArgs(paneId: string, text: string): string[] {
   return ["pane", "send-text", paneId, text];
 }
 
-export function buildSubmitTextArgs(paneId: string): string[] {
+export function submitKeyForAgent(agent?: string): string {
+  return agent?.toLowerCase() === "agy" ? "Enter" : "Ctrl+m";
+}
+
+export function buildSubmitTextArgs(paneId: string, agent?: string): string[] {
   // `pane send-text` treats control characters as composer text on current
   // Herdr builds. Ctrl+M carries the terminal CR/Enter key event through the
   // agent input pipeline, while named Enter is normalized to LF by Herdr.
-  return ["agent", "send-keys", paneId, "Ctrl+m"];
+  return ["agent", "send-keys", paneId, submitKeyForAgent(agent)];
 }
 
 /** Type text into the agent composer without submitting it. */
@@ -207,15 +211,15 @@ export function typeText(paneId: string, text: string): void {
 }
 
 /** Submit the current Codex composer using a terminal carriage-return key event. */
-export function submitText(paneId: string): void {
-  execHerdr(buildSubmitTextArgs(paneId));
+export function submitText(paneId: string, agent?: string): void {
+  execHerdr(buildSubmitTextArgs(paneId, agent));
 }
 
-export function sendText(paneId: string, text: string): void {
+export function sendText(paneId: string, text: string, agent?: string): void {
   // Send a literal prompt followed by CR. This is verified against Codex's
   // multiline composer; `pane run`, `agent prompt`, and named Enter send LF.
   typeText(paneId, text);
-  submitText(paneId);
+  submitText(paneId, agent);
 }
 
 // `herdr pane send-keys` accepts named keys (Escape, Enter, Up, Down, etc.)

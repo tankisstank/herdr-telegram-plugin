@@ -225,6 +225,7 @@ describe("syncTabs message ordering", () => {
       "Press enter to confirm or esc to cancel",
     ].join("\n");
     await syncTabs(1, telegram as any, state, deps);
+    await syncTabs(1, telegram as any, state, deps);
 
     expect(sent).toHaveLength(2);
     expect(sent[0]).toContain("git merge --abort");
@@ -232,6 +233,81 @@ describe("syncTabs message ordering", () => {
     expect(sent[1]).toContain("git merge --no-ff feature/audit");
     expect(sent[1]).not.toContain("git merge --abort");
     expect(cleared).toEqual([{ chatId: 1, messageId: 1 }]);
+  });
+
+  it("does not replace an active approval after one unstable pane snapshot", async () => {
+    const pane = makePane({ tab_id: "w1:tA", pane_id: "w1:pA", label: "Test", status: "blocked" });
+    const first = [
+      "Would you like to run the following command?",
+      "$ git status",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "Press enter to confirm or esc to cancel",
+    ].join("\n");
+    const transient = [
+      "Would you like to run the following command?",
+      "$ git diff --check",
+      "› 1. Yes, proceed (y)",
+      "  2. No, and tell Codex what to do differently (esc)",
+      "Press enter to confirm or esc to cancel",
+    ].join("\n");
+    let output = first;
+    const sent: string[] = [];
+    const cleared: number[] = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string) => {
+        sent.push(text);
+        return sent.length;
+      },
+      clearMessageKeyboard: async (_chatId: number, messageId: number) => { cleared.push(messageId); },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {},
+      known_tabs: { [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" } },
+    };
+    const deps = { map: new Map(), getAgents: () => [pane], readPane: () => output };
+
+    await syncTabs(1, telegram as any, state, deps);
+    output = transient;
+    await syncTabs(1, telegram as any, state, deps);
+    output = first;
+    await syncTabs(1, telegram as any, state, deps);
+
+    expect(sent).toHaveLength(1);
+    expect(cleared).toEqual([]);
+    expect(state.known_tabs[pane.tab_id].last_blocked_prompt_message_id).toBe(1);
+  });
+
+  it("replaces an active approval only after a new prompt is stable", async () => {
+    const pane = makePane({ tab_id: "w1:tA", pane_id: "w1:pA", label: "Test", status: "blocked" });
+    const first = ["Would you like to continue?", "› 1. Yes (y)", "  2. No (esc)", "Press enter to confirm"].join("\n");
+    const second = ["Would you like to deploy?", "› 1. Yes (y)", "  2. No (esc)", "Press enter to confirm"].join("\n");
+    let output = first;
+    const sent: string[] = [];
+    const cleared: number[] = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string) => { sent.push(text); return sent.length; },
+      clearMessageKeyboard: async (_chatId: number, messageId: number) => { cleared.push(messageId); },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {},
+      known_tabs: { [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" } },
+    };
+    const deps = { map: new Map(), getAgents: () => [pane], readPane: () => output };
+
+    await syncTabs(1, telegram as any, state, deps);
+    output = second;
+    await syncTabs(1, telegram as any, state, deps);
+    expect(sent).toHaveLength(1);
+    await syncTabs(1, telegram as any, state, deps);
+
+    expect(sent).toHaveLength(2);
+    expect(cleared).toEqual([1]);
+    expect(state.known_tabs[pane.tab_id].last_blocked_prompt_message_id).toBe(2);
   });
 
   it("retries a blocked pane until its options have rendered", async () => {
@@ -278,6 +354,42 @@ describe("syncTabs message ordering", () => {
     expect(sent).toHaveLength(1);
     expect(sent[0]).toContain("git merge --abort");
     expect(state.known_tabs[pane.tab_id].last_blocked_prompt_fingerprint).toMatch(/^[a-f0-9]{64}$/);
+  });
+
+  it("retries with a wider snapshot and does not publish partial code as an input request", async () => {
+    const pane = makePane({ tab_id: "w1:tA", pane_id: "w1:pA", label: "Test", status: "blocked" });
+    const fullPrompt = [
+      "Do you want to proceed?",
+      "pair_pattern = re.compile(r'<!--\\s*EN:\\s*(.*?)\\s*-->')",
+      "> 1. Yes",
+      "  2. No",
+      "↑/↓ Navigate · esc to cancel",
+    ].join("\n");
+    const requestedLines: number[] = [];
+    const sent: string[] = [];
+    const telegram = {
+      sendMessage: async (_chatId: number, _threadId: number, text: string) => { sent.push(text); return sent.length; },
+    };
+    const state: any = {
+      authorized_chat_id: 1,
+      paired_at: "now",
+      thread_mappings: {},
+      known_tabs: { [pane.tab_id]: { label: "W1-Test", thread_id: 10, status: "working" } },
+    };
+
+    await syncTabs(1, telegram as any, state, {
+      map: new Map(),
+      getAgents: () => [pane],
+      readPane: (_paneId, lines) => {
+        requestedLines.push(lines);
+        return lines === 160 ? "pair_pattern = re.compile(value)?" : fullPrompt;
+      },
+    });
+
+    expect(requestedLines).toEqual([160, 600]);
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toContain("Do you want to proceed?");
+    expect(sent[0]).not.toContain("could not be parsed safely");
   });
 
   it("keeps all options when a long option wraps across terminal lines", async () => {

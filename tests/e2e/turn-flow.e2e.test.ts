@@ -21,6 +21,7 @@ import { startDaemon } from "../../src/daemon.js";
 import { resetHerdrBinCache } from "../../src/herdr-client.js";
 import { TelegramClient } from "../../src/telegram-client.js";
 import { MockHerdr } from "./herdr-mock.js";
+import type { DaemonState } from "../../src/types.js";
 
 const PANE_ID = "w1:p1";
 const THREAD_ID = 140;
@@ -188,6 +189,7 @@ interface TestRig {
   tick: (ms?: number) => Promise<void>;
   /** Direct access to the daemon's FollowManager (test-only). */
   follows: import("../../src/follow-manager.js").FollowManager;
+  state: DaemonState;
 }
 
 async function setupRig(): Promise<TestRig> {
@@ -274,6 +276,8 @@ async function setupRig(): Promise<TestRig> {
 
   const follows = (daemon as unknown as { follows: import("../../src/follow-manager.js").FollowManager }).follows;
   if (!follows) throw new Error("daemon.follows was not exposed (skipTelegramStart: true required)");
+  const state = (daemon as unknown as { state: DaemonState }).state;
+  if (!state) throw new Error("daemon.state was not exposed (skipTelegramStart: true required)");
 
   return {
     herdr,
@@ -281,6 +285,7 @@ async function setupRig(): Promise<TestRig> {
     stateDir,
     paneId: PANE_ID,
     follows,
+    state,
     stop: daemon.stop,
     async dispatch(update: Update) {
       await tg.bot.handleUpdate(update);
@@ -388,5 +393,23 @@ describe("E2E: turn flow (mocked herdr, real grammy)", () => {
     const followToast = capture.callbackAnswers.find((c) => c.text.toLowerCase().includes("5m"));
     expect(followToast).toBeDefined();
     expect(followToast!.text.toLowerCase()).toContain("timer reset");
+  });
+
+  it("consumes approval state immediately so a consecutive blocked prompt is fresh", async () => {
+    const tab = Object.values(rig.state.known_tabs ?? {}).find((entry) => entry.thread_id === THREAD_ID);
+    expect(tab).toBeDefined();
+    tab!.status = "blocked";
+    tab!.last_blocked_prompt_fingerprint = "abcdef1234567890";
+    tab!.last_blocked_prompt_message_id = 77;
+    tab!.blocked_prompt_candidate_fingerprint = "candidate";
+    tab!.blocked_prompt_candidate_count = 1;
+
+    await rig.dispatch(buildCallbackUpdate(20, 77, "resp|abcdef123456|index:1:1"));
+
+    expect(tab!.last_blocked_prompt_fingerprint).toBeUndefined();
+    expect(tab!.last_blocked_prompt_message_id).toBeUndefined();
+    expect(tab!.blocked_prompt_candidate_fingerprint).toBeUndefined();
+    expect(tab!.blocked_prompt_candidate_count).toBeUndefined();
+    expect(capture.callbackAnswers.at(-1)?.text).toContain("Sent");
   });
 });

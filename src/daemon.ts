@@ -16,6 +16,7 @@ import { formatLastReadback } from "./commands.js";
 import { cleanPaneOutput, stripStatusBar } from "./wait-loop.js";
 import { formatStatus } from "./commands.js";
 import { sendEscape, sendKeys } from "./herdr-client.js";
+import { approvalResponseForKey } from "./approval-keys.js";
 import type { DaemonState } from "./types.js";
 import * as path from "node:path";
 import { homedir } from "node:os";
@@ -104,18 +105,20 @@ export async function startDaemon(
   const pendingApprovalComments = new Map<number, {
     paneId: string;
     label: string;
+    agent: string;
     promptFingerprint: string;
     expiresAt: number;
   }>();
   const APPROVAL_COMMENT_TIMEOUT_MS = 5 * 60_000;
   const QUEUED_SUBMISSION_TIMEOUT_MS = 30 * 60_000;
-  const queuedSubmissions = new Map<string, { threadId: number; startedAt: number; timer?: ReturnType<typeof setTimeout> }>();
+  const queuedSubmissions = new Map<string, { threadId: number; agent: string; startedAt: number; timer?: ReturnType<typeof setTimeout> }>();
 
-  function queueComposerSubmission(paneId: string, threadId: number): void {
+  function queueComposerSubmission(paneId: string, threadId: number, agent: string): void {
     const existing = queuedSubmissions.get(paneId);
     if (existing?.timer) clearTimeout(existing.timer);
-    const pending = existing ?? { threadId, startedAt: Date.now() };
+    const pending = existing ?? { threadId, agent, startedAt: Date.now() };
     pending.threadId = threadId;
+    pending.agent = agent;
     queuedSubmissions.set(paneId, pending);
 
     const poll = () => {
@@ -130,7 +133,7 @@ export async function startDaemon(
         return;
       }
       try {
-        submitText(paneId);
+        submitText(paneId, pending.agent);
         queuedSubmissions.delete(paneId);
         log.info("Submitted queued composer prompt", { paneId, threadId: pending.threadId });
       } catch (err) {
@@ -145,24 +148,6 @@ export async function startDaemon(
     pending.timer = setTimeout(poll, 1_000);
   }
 
-  function approvalResponseForKey(key: string): { kind: "keys" | "invalid"; values: string[] } {
-    const normalized = key.trim().toLowerCase();
-    // Approval callbacks must send the actual TUI shortcut. Sending the
-    // human-readable option label makes the agent echo that label as input.
-    if (["yes", "y"].includes(normalized)) return { kind: "keys", values: ["y", "Enter"] };
-    if (["all", "p", "trust"].includes(normalized)) return { kind: "keys", values: ["p", "Enter"] };
-    if (["no", "n"].includes(normalized)) return { kind: "keys", values: ["n", "Enter"] };
-    if (["esc", "escape"].includes(normalized)) return { kind: "keys", values: ["Escape"] };
-    const index = normalized.match(/^index:(\d+)$/);
-    if (index) {
-      const target = Number(index[1]);
-      if (target >= 1 && target <= 12) {
-        return { kind: "keys", values: ["Home", ...Array.from({ length: target - 1 }, () => "Down"), "Enter"] };
-      }
-    }
-    return { kind: "invalid", values: [] };
-  }
-
   function sendApprovalResponse(paneId: string, key: string): string {
     const response = approvalResponseForKey(key);
     if (response.kind === "keys") {
@@ -170,6 +155,13 @@ export async function startDaemon(
       return response.values.join(" ");
     }
     throw new Error(`Unsupported approval option: ${key}`);
+  }
+
+  function consumeBlockedApproval(tab: NonNullable<DaemonState["known_tabs"]>[string]): void {
+    delete tab.last_blocked_prompt_fingerprint;
+    delete tab.last_blocked_prompt_message_id;
+    delete tab.blocked_prompt_candidate_fingerprint;
+    delete tab.blocked_prompt_candidate_count;
   }
   /** Active background follow loops, keyed by threadId. Cancel the runner to stop. */
   const followLoops = new Map<number, { cancel: () => void }>();
@@ -229,7 +221,7 @@ export async function startDaemon(
       if (turns.isBusy(mapping.pane_id)) {
         try {
           typeText(mapping.pane_id, text);
-          queueComposerSubmission(mapping.pane_id, threadId);
+          queueComposerSubmission(mapping.pane_id, threadId, mapping.agent);
         } catch (err) {
           log.error("Direct selected send failed", {
             paneId: mapping.pane_id,
@@ -241,7 +233,7 @@ export async function startDaemon(
       }
       void turns.start(mapping.pane_id, async (signal) => {
         try {
-          await runAgentTurn(mapping.pane_id, threadId, text, cfg, tg, state.authorized_chat_id!, { signal });
+          await runAgentTurn(mapping.pane_id, threadId, text, cfg, tg, state.authorized_chat_id!, { signal, agent: mapping.agent });
         } catch (err) {
           log.error("Selected agent turn failed", {
             paneId: mapping.pane_id,
@@ -314,7 +306,7 @@ export async function startDaemon(
     }
     pendingApprovalComments.delete(threadId);
     try {
-      sendText(pending.paneId, text);
+      sendText(pending.paneId, text, pending.agent);
       await ctx.reply(`Sent comment to ${pending.label}.`);
     } catch (err) {
       log.error("Approval comment send failed", {
@@ -542,7 +534,7 @@ export async function startDaemon(
           mapping.pane_id, threadId,
           "Keep it under 4000 characters. Summarize what we've been working on: original goal, progress, blockers, next steps.",
           cfg, tg, state.authorized_chat_id!,
-          { signal }
+          { signal, agent: mapping.agent }
         );
       } catch (err) {
         log.error("Digest turn failed", {
@@ -659,7 +651,7 @@ export async function startDaemon(
     if (turns.isBusy(mapping.pane_id) || agentAlreadyWorking) {
       try {
         typeText(mapping.pane_id, text);
-        queueComposerSubmission(mapping.pane_id, threadId);
+        queueComposerSubmission(mapping.pane_id, threadId, mapping.agent);
         await ctx.api.setMessageReaction(ctx.chat!.id, ctx.message!.message_id, [{ type: "emoji", emoji: "👀" }]);
       } catch {
         // reactions may be unavailable; ignore.
@@ -668,7 +660,7 @@ export async function startDaemon(
     }
     void turns.start(mapping.pane_id, async (signal) => {
       try {
-        await runAgentTurn(mapping.pane_id, threadId, text, cfg, tg, chatId, { signal });
+        await runAgentTurn(mapping.pane_id, threadId, text, cfg, tg, chatId, { signal, agent: mapping.agent });
       } catch (err) {
         log.error("Agent turn failed", {
           paneId: mapping.pane_id,
@@ -707,7 +699,8 @@ export async function startDaemon(
       }
       const tab = Object.values(state.known_tabs ?? {}).find((entry) => entry.thread_id === threadId);
       const activeFingerprint = tab?.last_blocked_prompt_fingerprint;
-      if (!activeFingerprint || !activeFingerprint.startsWith(promptId)) {
+      const messageId = ctx.callbackQuery.message?.message_id;
+      if (!activeFingerprint || !activeFingerprint.startsWith(promptId) || messageId !== tab?.last_blocked_prompt_message_id) {
         await ctx.answerCallbackQuery({ text: "This approval expired. Use the latest prompt." });
         try { await ctx.editMessageReplyMarkup({ reply_markup: undefined }); } catch {}
         return;
@@ -715,9 +708,11 @@ export async function startDaemon(
       try {
         if (kind === "respc") {
           sendApprovalResponse(mapping.pane_id, key || "esc");
+          consumeBlockedApproval(tab);
           pendingApprovalComments.set(threadId, {
             paneId: mapping.pane_id,
             label: mapping.label,
+            agent: mapping.agent,
             promptFingerprint: activeFingerprint,
             expiresAt: Date.now() + APPROVAL_COMMENT_TIMEOUT_MS,
           });
@@ -731,6 +726,7 @@ export async function startDaemon(
           return;
         }
         const sent = sendApprovalResponse(mapping.pane_id, key || "yes");
+        consumeBlockedApproval(tab);
         await ctx.answerCallbackQuery({ text: `Sent ${key}.` });
         try {
           await ctx.editMessageReplyMarkup({ reply_markup: undefined });
@@ -921,6 +917,7 @@ export async function startDaemon(
   if (opts.skipTelegramStart) {
     result.tg = tg;
     result.follows = follows;
+    result.state = state;
   }
   return result;
 }

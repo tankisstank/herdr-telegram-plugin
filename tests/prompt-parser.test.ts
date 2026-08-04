@@ -55,4 +55,61 @@ describe("interactive prompt parser", () => {
       "Không, hãy hướng dẫn tôi",
     ]);
   });
+
+  it("keeps Agy's full wrapped question instead of selecting only its last line", () => {
+    const parsed = parseInteractivePrompt([
+      "• Chuẩn bị kiểm tra cấu hình từ xa.",
+      "? Bạn có muốn cho phép đọc tên các khóa cấu hình trên VPS",
+      "  để xác định đúng trường mật khẩu trước khi thay đổi",
+      "  không?",
+      "  $ ssh root@example.test \"sed -n '1,100p' /opt/app/config.json\"",
+      "> 1. Yes",
+      "  2. Yes, and always allow in this conversation",
+      "  3. Yes, and persist to settings",
+      "  4. No",
+      "↑/↓ Navigate · tab Amend · esc to cancel",
+    ].join("\n"));
+
+    expect(parsed.adapter).toBe("agy");
+    expect(parsed.confidence).toBe("high");
+    expect(parsed.text).toContain("Bạn có muốn cho phép đọc tên các khóa cấu hình trên VPS");
+    expect(parsed.text).toContain("để xác định đúng trường mật khẩu trước khi thay đổi");
+    expect(parsed.text).toContain("không?");
+    expect(parsed.text).toContain("$ ssh root@example.test");
+    expect(parsed.text).not.toContain("Chuẩn bị kiểm tra cấu hình từ xa");
+  });
+
+  it("ignores numbered code and regex question marks before Agy menu options", () => {
+    const parsed = parseInteractivePrompt([
+      "Do you want to proceed?",
+      "pair_pattern = re.compile(r'<!--\\s*EN:\\s*(.*?)\\s*-->')",
+      "1. this is code data, not a menu choice",
+      "2. this is also code data",
+      "> 1. Yes",
+      "  2. Yes, and always allow in this conversation",
+      "  3. Yes, and persist to settings",
+      "  4. No",
+      "↑/↓ Navigate · tab Amend · esc to cancel",
+    ].join("\n"));
+
+    expect(parsed.confidence).toBe("high");
+    expect(parsed.text).toContain("Do you want to proceed?");
+    expect(parsed.options.map((option) => option.label)).toEqual([
+      "Yes",
+      "Yes, and always allow in this conversation",
+      "Yes, and persist to settings",
+      "No",
+    ]);
+  });
+
+  it("does not treat a code expression ending in a question mark as a prompt", () => {
+    const parsed = parseInteractivePrompt([
+      "pair_pattern = re.compile(value)?",
+      "> 1. generated code branch",
+      "  2. another generated branch",
+    ].join("\n"));
+
+    expect(parsed.confidence).toBe("low");
+    expect(parsed.options).toEqual([]);
+  });
 });

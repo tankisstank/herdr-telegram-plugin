@@ -167,6 +167,28 @@ describe("/stop command handler", () => {
   });
 });
 
+describe("/submit command handler", () => {
+  it("uses the mapped agent's composer submit key without typing more text", async () => {
+    const submitTextSpy = vi.spyOn(herdrClient, "submitText").mockImplementation(() => {});
+    const fake = makeFakeBot();
+    const map = new Map<number, ThreadMapping>();
+    map.set(140, { pane_id: "w1:p27", label: "Agy", agent: "agy", created_at: "x" });
+    registerCommands(fake.bot, {
+      map,
+      stateDir: "/tmp/no-such",
+      chatId: -100,
+      startTime: Date.now(),
+      saveMappings: () => {},
+    } as CommandDeps);
+
+    await fake.run("submit", { message: { message_thread_id: 140 } });
+
+    expect(submitTextSpy).toHaveBeenCalledWith("w1:p27", "agy");
+    expect(fake.replies.join("\n")).toContain("Submitted the current composer");
+    submitTextSpy.mockRestore();
+  });
+});
+
 describe("/model and /reasoning command handlers", () => {
   function modelCommandDeps(turns?: CommandDeps["turns"]): CommandDeps {
     const map = new Map<number, ThreadMapping>();
@@ -188,7 +210,7 @@ describe("/model and /reasoning command handlers", () => {
 
     await fake.run("model", { message: { message_thread_id: 140 } });
 
-    expect(sendTextSpy).toHaveBeenCalledWith("w1:p27", "/model");
+    expect(sendTextSpy).toHaveBeenCalledWith("w1:p27", "/model", "codex");
     expect(fake.replies.join("\n")).toContain("model picker");
     sendTextSpy.mockRestore();
   });
@@ -200,7 +222,7 @@ describe("/model and /reasoning command handlers", () => {
 
     await fake.run("reasoning", { message: { message_thread_id: 140 } });
 
-    expect(sendTextSpy).toHaveBeenCalledWith("w1:p27", "/model");
+    expect(sendTextSpy).toHaveBeenCalledWith("w1:p27", "/model", "codex");
     expect(fake.replies.join("\n")).toContain("Low, Medium, or High");
     sendTextSpy.mockRestore();
   });

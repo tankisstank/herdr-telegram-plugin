@@ -31,9 +31,10 @@ function optionButtonText(option: InteractivePrompt["options"][number]): string 
 
 function promptKeyboard(prompt: InteractivePrompt, promptId: string) {
   const options = prompt.options;
+  const selectedIndex = prompt.selectedIndex ?? 1;
   const buttons = options.slice(0, 6).map((option) => ({
     text: optionButtonText(option),
-    callback_data: `${option.wantsComment ? "respc" : "resp"}|${promptId}|${option.key}`,
+    callback_data: `${option.wantsComment ? "respc" : "resp"}|${promptId}|${option.key.startsWith("index:") ? `${option.key}:${selectedIndex}` : option.key}`,
   }));
   return { inline_keyboard: buttons.length ? [buttons] : [[
     { text: "Yes", callback_data: `resp|${promptId}|yes` },
@@ -61,7 +62,9 @@ function blockedPrompt(
   paneReader: (paneId: string, lines: number) => string = readPane,
 ): InteractivePrompt {
   try {
-    return parseInteractivePrompt(paneReader(pane.pane_id, 160));
+    const compact = parseInteractivePrompt(paneReader(pane.pane_id, 160));
+    if (compact.confidence === "high") return compact;
+    return parseInteractivePrompt(paneReader(pane.pane_id, 600));
   } catch {
     return { adapter: "generic", text: "", options: [], confidence: "low" };
   }
@@ -81,6 +84,31 @@ function blockedMessage(
     text: formatApprovalMessage(heading, prompt.text),
     reply_markup: promptKeyboard(prompt, fingerprint.slice(0, 12)),
   };
+}
+
+function clearBlockedPromptCandidate(tab: NonNullable<DaemonState["known_tabs"]>[string]): void {
+  delete tab.blocked_prompt_candidate_fingerprint;
+  delete tab.blocked_prompt_candidate_count;
+}
+
+function acceptBlockedPromptReplacement(
+  tab: NonNullable<DaemonState["known_tabs"]>[string],
+  fingerprint: string,
+): boolean {
+  if (!tab.last_blocked_prompt_fingerprint) return true;
+  if (tab.last_blocked_prompt_fingerprint === fingerprint) {
+    clearBlockedPromptCandidate(tab);
+    return false;
+  }
+  if (tab.blocked_prompt_candidate_fingerprint === fingerprint) {
+    tab.blocked_prompt_candidate_count = (tab.blocked_prompt_candidate_count ?? 1) + 1;
+  } else {
+    tab.blocked_prompt_candidate_fingerprint = fingerprint;
+    tab.blocked_prompt_candidate_count = 1;
+  }
+  if (tab.blocked_prompt_candidate_count < 2) return false;
+  clearBlockedPromptCandidate(tab);
+  return true;
 }
 
 /**
@@ -295,10 +323,12 @@ export async function syncTabs(
       if (pane.status === "blocked") {
         if (statusTransition && previous !== "blocked") {
           delete existing.last_blocked_prompt_fingerprint;
+          delete existing.last_blocked_prompt_message_id;
+          clearBlockedPromptCandidate(existing);
         }
         const prompt = blockedPrompt(pane, deps?.readPane);
         const fingerprint = promptFingerprint(prompt);
-        if (fingerprint && fingerprint !== existing.last_blocked_prompt_fingerprint) {
+        if (fingerprint && acceptBlockedPromptReplacement(existing, fingerprint)) {
           if (existing.last_blocked_prompt_message_id && "clearMessageKeyboard" in tg) {
             try {
               await tg.clearMessageKeyboard(chatId, existing.last_blocked_prompt_message_id);
@@ -316,19 +346,11 @@ export async function syncTabs(
           existing.last_blocked_prompt_fingerprint = fingerprint;
           existing.last_blocked_prompt_message_id = messageId;
           promptsSent.push(pane.label);
-        } else if (!fingerprint && previous !== "blocked" && prompt.text) {
-          const messageId = await tg.sendMessage(
-            chatId,
-            existing.thread_id,
-            `⚠️ ${pane.label} needs input, but the prompt could not be parsed safely.\n\n${prompt.text}\n\nUse /last or respond from the Herdr pane.`,
-          );
-          existing.last_blocked_prompt_fingerprint = "unparsed";
-          existing.last_blocked_prompt_message_id = messageId;
-          promptsSent.push(pane.label);
         }
       } else {
         delete existing.last_blocked_prompt_fingerprint;
         delete existing.last_blocked_prompt_message_id;
+        clearBlockedPromptCandidate(existing);
         // Normal working/idle/done transitions are represented by progress or
         // the final message. Keep status messages for blocked and errors only.
       }

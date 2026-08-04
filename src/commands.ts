@@ -1,6 +1,6 @@
 import { Bot, type Context, InlineKeyboard } from "grammy";
 import type { PaneInfo, ThreadMapping } from "./types.js";
-import { getAgents, readPane, sendText, sendEscape, sendInterrupt, sendKeys } from "./herdr-client.js";
+import { getAgents, readPane, sendText, submitText, sendEscape, sendInterrupt, sendKeys } from "./herdr-client.js";
 import { findMapping } from "./mapping.js";
 import { isPaired } from "./pairing.js";
 import type { DaemonState } from "./types.js";
@@ -172,7 +172,7 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
       await ctx.reply(`Sent to ${selected.mapping.label}. Watching the bound topic for the response.`);
       return;
     }
-    sendText(paneId, text);
+    sendText(paneId, text, selected.mapping.agent);
     await ctx.reply(`Sent to ${selected.mapping.label}.`);
   }
 
@@ -207,7 +207,7 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
       return;
     }
     if (action === "trust") {
-      sendText(paneId, "trust, always allow");
+      sendText(paneId, "trust, always allow", selected.mapping.agent);
       await ctx.reply(`Trusted ${selected.mapping.label}.`);
       return;
     }
@@ -266,6 +266,7 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
         "/status — bridge uptime and connection info (incl. active follows)",
         "/interrupt — send Ctrl+C to this thread's agent (hard interrupt)",
         "/stop — send ESC to this thread's agent (soft cancel of current operation)",
+        "/submit — submit text already present in this topic's agent composer",
         "/trust — send 'trust, always allow' to this thread's agent",
         "/model — open Codex's model picker for this idle agent",
         "/reasoning — open Codex's reasoning picker for this idle agent",
@@ -419,8 +420,23 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     }
     const mapping = findMapping(threadId, deps.map);
     if (!mapping) { await ctx.reply("No pane for this topic."); return; }
-    sendText(mapping.pane_id, "trust, always allow");
+    sendText(mapping.pane_id, "trust, always allow", mapping.agent);
     await ctx.reply(`Trusted ${mapping.label}`);
+  });
+
+  bot.command("submit", async (ctx) => {
+    const threadId = ctx.message?.message_thread_id;
+    if (!threadId) {
+      await ctx.reply("Use /submit inside an agent topic.");
+      return;
+    }
+    const mapping = findMapping(threadId, deps.map);
+    if (!mapping) {
+      await ctx.reply("No pane for this topic.");
+      return;
+    }
+    submitText(mapping.pane_id, mapping.agent);
+    await ctx.reply(`Submitted the current composer for ${mapping.label}.`);
   });
 
   async function openNativeModelPicker(ctx: Context, label: "model" | "reasoning"): Promise<void> {
@@ -441,7 +457,7 @@ export function registerCommands(bot: Bot<Context>, deps: CommandDeps): void {
     }
     // Codex exposes model and reasoning selection through its native /model
     // picker. Keep the catalog in Codex so it matches the signed-in account.
-    sendText(mapping.pane_id, "/model");
+    sendText(mapping.pane_id, "/model", mapping.agent);
     // The TUI is the source of truth for account-specific model availability.
     // Relay its rendered picker so Telegram users can see names and the
     // current highlight instead of navigating blind with Up/Down.

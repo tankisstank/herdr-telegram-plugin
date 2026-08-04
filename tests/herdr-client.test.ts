@@ -112,6 +112,12 @@ describe("buildSubmitTextArgs", () => {
       "agent", "send-keys", "w1:pZ", "Ctrl+m",
     ]);
   });
+
+  it("uses Enter for Agy's single-line composer", () => {
+    expect(buildSubmitTextArgs("w1:pZ", "agy")).toEqual([
+      "agent", "send-keys", "w1:pZ", "Enter",
+    ]);
+  });
 });
 
 describe("buildSendKeysArgs", () => {

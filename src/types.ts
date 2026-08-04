@@ -28,6 +28,10 @@ export interface KnownTabState {
   last_blocked_prompt_fingerprint?: string;
   /** Telegram message carrying the last interactive prompt keyboard. */
   last_blocked_prompt_message_id?: number;
+  /** Candidate replacement seen while the pane remains blocked. A second
+   * identical sample is required before replacing the active approval. */
+  blocked_prompt_candidate_fingerprint?: string;
+  blocked_prompt_candidate_count?: number;
 }
 
 export interface DaemonState {

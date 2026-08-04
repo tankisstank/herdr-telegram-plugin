@@ -245,6 +245,7 @@ flowchart TD
 | `/model` | Open the native Codex model picker and relay its choices. |
 | `/reasoning` | Open the native picker and select Low, Medium, or High reasoning. |
 | `/stop` | Send Escape to softly cancel the current operation. |
+| `/submit` | Submit text already present in the topic agent's composer without typing it again. |
 | `/interrupt` | Send Ctrl+C for a hard interrupt. |
 | `/trust` | Send `trust, always allow` to the agent. |
 | `/digest` | Ask the agent for a work summary. |
